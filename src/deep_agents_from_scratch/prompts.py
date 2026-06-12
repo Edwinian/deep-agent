@@ -40,8 +40,10 @@ TODO_USAGE_INSTRUCTIONS = """Based upon the user's request:
 4. Mark you task as completed, and proceed to the next TODO.
 5. Continue this process until you have completed all TODOs.
 
-IMPORTANT: Always create a research plan of TODOs and conduct research following the above guidelines for ANY user request.
-IMPORTANT: Aim to batch research tasks into a *single TODO* in order to minimize the number of TODOs you have to keep track of.
+IMPORTANT: Always create a research plan of TODOs for any user request. Your plan should always include:
+- A task to save the user request to the file system for reference
+- One or more research tasks (batch closely related searches into a single TODO)
+- A final task to compile findings into a comprehensive response
 """
 
 LS_DESCRIPTION = """List all files in the virtual filesystem stored in agent state.
@@ -74,9 +76,10 @@ Important: This replaces the entire file content."""
 FILE_USAGE_INSTRUCTIONS = """You have access to a virtual file system to help you retain and save context.
 
 ## Workflow Process
+Always follow these steps in order for every request:
 1. **Orient**: Use ls() to see existing files before starting work
-2. **Save**: Use write_file() to store the user's request so that we can keep it for later 
-3. **Research**: Proceed with research. The search tool will write files.  
+2. **Save**: Use write_file() to store the user's request before doing any research
+3. **Research**: Proceed with research. The search tool will write files.
 4. **Read**: Once you are satisfied with the collected sources, read the files and use them to answer the user's question directly.
 """
 
