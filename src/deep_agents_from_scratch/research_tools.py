@@ -5,9 +5,11 @@ including web search capabilities and content summarization tools.
 """
 import os
 from datetime import datetime
+from pathlib import Path
 import uuid, base64
 
 import httpx
+from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.tools import InjectedToolArg, InjectedToolCallId, tool
@@ -21,8 +23,10 @@ from typing_extensions import Annotated, Literal
 from deep_agents_from_scratch.prompts import SUMMARIZE_WEB_SEARCH
 from deep_agents_from_scratch.state import DeepAgentState
 
-# Summarization model 
-summarization_model = init_chat_model(model="openai:gpt-4o-mini")
+load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=True)
+
+# Summarization model
+summarization_model = init_chat_model(model="xai:grok-3-mini")
 tavily_client = TavilyClient()
 
 class Summary(BaseModel):
