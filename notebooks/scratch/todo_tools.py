@@ -1,8 +1,6 @@
 """TODO management tools for task planning and progress tracking.
 
-This module provides tools for creating and managing structured task lists
-that enable agents to plan complex workflows and track progress through
-multi-step operations.
+Scratch tutorial implementation — use deepagents TodoListMiddleware in production.
 """
 
 from typing import Annotated
@@ -16,7 +14,7 @@ from deep_agents_from_scratch.prompts import WRITE_TODOS_DESCRIPTION
 from deep_agents_from_scratch.state import DeepAgentState, Todo
 
 
-@tool(description=WRITE_TODOS_DESCRIPTION,parse_docstring=True)
+@tool(description=WRITE_TODOS_DESCRIPTION, parse_docstring=True)
 def write_todos(
     todos: list[Todo], tool_call_id: Annotated[str, InjectedToolCallId]
 ) -> Command:
@@ -56,6 +54,7 @@ def read_todos(
     Returns:
         Formatted string representation of the current TODO list
     """
+    del tool_call_id
     todos = state.get("todos", [])
     if not todos:
         return "No todos currently in the list."

@@ -1,7 +1,6 @@
 """Virtual file system tools for agent state management.
 
-This module provides tools for managing a virtual filesystem stored in agent state,
-enabling context offloading and information persistence across agent interactions.
+Scratch tutorial implementation — use deepagents FilesystemMiddleware in production.
 """
 
 from typing import Annotated
@@ -17,6 +16,16 @@ from deep_agents_from_scratch.prompts import (
     WRITE_FILE_DESCRIPTION,
 )
 from deep_agents_from_scratch.state import DeepAgentState
+
+
+def _file_entry_to_text(file_entry: str | dict[str, object]) -> str:
+    """Normalize scratch (str) and deepagents (FileData) file entries to text."""
+    if isinstance(file_entry, dict):
+        content = file_entry.get("content", [])
+        if isinstance(content, list):
+            return "\n".join(str(line) for line in content)
+        return str(content)
+    return file_entry
 
 
 @tool(description=LS_DESCRIPTION)
@@ -47,7 +56,7 @@ def read_file(
     if file_path not in files:
         return f"Error: File '{file_path}' not found"
 
-    content = files[file_path]
+    content = _file_entry_to_text(files[file_path])
     if not content:
         return "System reminder: File exists but has empty contents"
 

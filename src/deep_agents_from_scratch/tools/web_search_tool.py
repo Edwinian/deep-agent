@@ -1,8 +1,5 @@
-"""Research Tools.
+"""Web search tool and content processing utilities for research agents."""
 
-This module provides search and content processing utilities for the research agent,
-including web search capabilities and content summarization tools.
-"""
 import os
 from datetime import datetime
 from pathlib import Path
@@ -18,16 +15,38 @@ from langgraph.types import Command
 from markdownify import markdownify
 from pydantic import BaseModel, Field
 from tavily import TavilyClient
+from typing import Any
+
+from deepagents.backends.utils import create_file_data
+
 from typing_extensions import Annotated, Literal
 
 from deep_agents_from_scratch.prompts import SUMMARIZE_WEB_SEARCH
 from deep_agents_from_scratch.state import DeepAgentState
 
-load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=True)
+load_dotenv(Path(__file__).resolve().parents[3] / ".env", override=True)
 
 # Summarization model
 summarization_model = init_chat_model(model="xai:grok-3-mini")
 tavily_client = TavilyClient()
+
+
+def _is_deepagents_file_entry(file_entry: Any) -> bool:
+    """Return True if a state files entry uses deepagents FileData format."""
+    return isinstance(file_entry, dict) and "content" in file_entry
+
+
+def _state_uses_deepagents_files(files: dict[str, Any]) -> bool:
+    """Detect whether agent state stores files as deepagents FileData objects."""
+    return not files or any(_is_deepagents_file_entry(entry) for entry in files.values())
+
+
+def _write_file_to_state(files: dict[str, Any], filename: str, content: str) -> None:
+    """Write a file entry compatible with scratch and create_deep_agent state."""
+    if _state_uses_deepagents_files(files):
+        files[filename] = create_file_data(content)
+    else:
+        files[filename] = content
 
 class Summary(BaseModel):
     """Schema for webpage content summarization."""
@@ -154,7 +173,7 @@ def process_search_results(results: dict) -> list[dict]:
 
 
 @tool(parse_docstring=True)
-def tavily_search(
+def web_search_tool(
     query: str,
     state: Annotated[DeepAgentState, InjectedState],
     tool_call_id: Annotated[str, InjectedToolCallId],
@@ -192,9 +211,9 @@ def tavily_search(
     saved_files = []
     summaries = []
 
-    for i, result in enumerate(processed_results):
+    for result in processed_results:
         # Use the AI-generated filename from summarization
-        filename = result['filename']
+        filename = result["filename"]
 
         # Create file content with full details
         file_content = f"""# Search Result: {result['title']}
@@ -210,7 +229,7 @@ def tavily_search(
 {result['raw_content'] if result['raw_content'] else 'No raw content available'}
 """
 
-        files[filename] = file_content
+        _write_file_to_state(files, filename, file_content)
         saved_files.append(filename)
         summaries.append(f"- {filename}: {result['summary']}...")
 
@@ -230,31 +249,3 @@ Files: {', '.join(saved_files)}
             ],
         }
     )
-
-@tool(parse_docstring=True)
-def think_tool(reflection: str) -> str:
-    """Tool for strategic reflection on research progress and decision-making.
-
-    Use this tool after each search to analyze results and plan next steps systematically.
-    This creates a deliberate pause in the research workflow for quality decision-making.
-
-    When to use:
-    - After receiving search results: What key information did I find?
-    - Before deciding next steps: Do I have enough to answer comprehensively?
-    - When assessing research gaps: What specific information am I still missing?
-    - Before concluding research: Can I provide a complete answer now?
-    - How complex is the question: Have I reached the number of search limits?
-
-    Reflection should address:
-    1. Analysis of current findings - What concrete information have I gathered?
-    2. Gap assessment - What crucial information is still missing?
-    3. Quality evaluation - Do I have sufficient evidence/examples for a good answer?
-    4. Strategic decision - Should I continue searching or provide my answer?
-
-    Args:
-        reflection: Your detailed reflection on research progress, findings, gaps, and next steps
-
-    Returns:
-        Confirmation that reflection was recorded for decision-making
-    """
-    return f"Reflection recorded: {reflection}"

@@ -1,6 +1,10 @@
 """Deep Agents from Scratch - Educational LangGraph Agent Framework.
 
-This package demonstrates progressive agent architectures through educational examples,
-starting with basic TODO list functionality and advancing to full agents with
-file systems and subagent spawning.
+Package layout:
+- tools/: agent tools (e.g. web_search_tool)
+- prompts/: system prompts and tool descriptions
+- agents/: agent definitions (reserved)
+- state.py: shared agent state schema
+
+Scratch tutorial tools live in notebooks/scratch/.
 """

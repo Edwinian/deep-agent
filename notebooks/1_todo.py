@@ -15,6 +15,8 @@ PROJECT_ROOT = NOTEBOOK_DIR.parent
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
+if str(NOTEBOOK_DIR) not in sys.path:
+    sys.path.insert(0, str(NOTEBOOK_DIR))
 
 from dotenv import load_dotenv
 from langchain.agents import create_agent
@@ -26,7 +28,7 @@ from deep_agents_from_scratch.prompts import (
     WRITE_TODOS_DESCRIPTION,
 )
 from deep_agents_from_scratch.state import DeepAgentState
-from deep_agents_from_scratch.todo_tools import read_todos, write_todos
+from scratch.todo_tools import read_todos, write_todos
 from utils import format_messages, show_prompt
 
 MODEL = "xai:grok-3-mini"

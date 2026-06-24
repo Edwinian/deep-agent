@@ -16,6 +16,8 @@ PROJECT_ROOT = NOTEBOOK_DIR.parent
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
+if str(NOTEBOOK_DIR) not in sys.path:
+    sys.path.insert(0, str(NOTEBOOK_DIR))
 
 from dotenv import load_dotenv
 from langchain.agents import create_agent
@@ -25,7 +27,7 @@ from langchain_core.tools import tool
 
 from deep_agents_from_scratch.prompts import SUBAGENT_USAGE_INSTRUCTIONS
 from deep_agents_from_scratch.state import DeepAgentState
-from deep_agents_from_scratch.task_tool import SubAgent, _create_task_tool
+from scratch.task_tool import SubAgent, _create_task_tool
 from utils import format_messages, show_prompt
 
 MODEL = "xai:grok-3-mini"
@@ -41,7 +43,7 @@ to external services by providing a unified language for data exchange. """
 
 SIMPLE_RESEARCH_INSTRUCTIONS = """You are a researcher. Research the topic provided to you. IMPORTANT: Just make a single call to the web_search tool and use the result provided by the tool to answer the provided topic."""
 
-RESEARCH_SUB_AGENT: SubAgent = {
+RESEARCH_AGENT: SubAgent = {
     "name": "research-agent",
     "description": "Delegate research to the sub-agent researcher. Only give this researcher one topic at a time.",
     "prompt": SIMPLE_RESEARCH_INSTRUCTIONS,
@@ -93,7 +95,7 @@ def main() -> None:
     sub_agent_tools = [web_search]
 
     task_tool = _create_task_tool(
-        sub_agent_tools, [RESEARCH_SUB_AGENT], model, DeepAgentState
+        sub_agent_tools, [RESEARCH_AGENT], model, DeepAgentState
     )
 
     agent = create_agent(
