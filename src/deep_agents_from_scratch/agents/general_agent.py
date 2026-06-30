@@ -14,6 +14,8 @@ DEFAULT_MODEL = "xai:grok-3-mini"
 MAX_CONCURRENT_RESEARCH_UNITS = 3
 MAX_RESEARCHER_ITERATIONS = 3
 
+GENERAL_AGENT_ID = 1002
+
 
 def _build_subagent_instructions() -> str:
     return SUBAGENT_USAGE_INSTRUCTIONS.format(
@@ -42,6 +44,7 @@ def _build_system_prompt() -> str:
 
 
 GENERAL_AGENT: DeepAgent = {
+    "id": GENERAL_AGENT_ID,
     "name": "general-agent",
     "description": (
         "Orchestrates research by managing todos, files, and delegating to specialized agents."
@@ -49,4 +52,5 @@ GENERAL_AGENT: DeepAgent = {
     "system_prompt": _build_system_prompt(),
     "subagents": [RESEARCH_AGENT],
     "model": DEFAULT_MODEL,
+    "tools": [],
 }

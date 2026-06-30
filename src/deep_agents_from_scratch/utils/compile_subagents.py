@@ -1,8 +1,9 @@
-"""Compile DeepAgent specs for create_deep_agent."""
+"""Compile DeepAgent specs for create_deep_agent subagents parameter."""
 
 from __future__ import annotations
 
-from deepagents import create_deep_agent
+import json
+
 from deepagents.middleware.subagents import CompiledSubAgent, SubAgent
 from langchain_core.language_models import BaseChatModel
 
@@ -26,11 +27,11 @@ def _to_subagent_spec(agent: DeepAgent) -> SubAgent:
     return spec
 
 
-def _compile_agent(
+def _compile_subagent(
     agent: DeepAgent | CompiledSubAgent,
     default_model: str | BaseChatModel | None,
 ) -> SubAgent | CompiledSubAgent:
-    """Compile a single agent, recursively handling nested subagents."""
+    """Compile a single subagent spec, recursively handling nested subagents."""
     if "runnable" in agent:
         return agent
 
@@ -38,17 +39,19 @@ def _compile_agent(
     if not nested:
         return _to_subagent_spec(agent)
 
+    from deep_agents_from_scratch.utils.compile_agent import compile_agent
+
     model = agent.get("model", default_model)
-    compiled_nested = compile_subagents(nested, model=model)
-    runnable = create_deep_agent(
-        tools=agent.get("tools"),
-        system_prompt=agent["system_prompt"],
-        subagents=compiled_nested,
-        model=model,
-    )
+    runnable = compile_agent(agent, model=model)
     return {
         "name": agent["name"],
-        "description": agent["description"],
+        "description": json.dumps(
+            {
+                "description": agent["description"],
+                "system_prompt": agent["system_prompt"],
+            },
+            ensure_ascii=False,
+        ),
         "runnable": runnable,
     }
 
@@ -58,5 +61,5 @@ def compile_subagents(
     *,
     model: str | BaseChatModel | None = None,
 ) -> list[SubAgent | CompiledSubAgent]:
-    """Compile DeepAgent specs for create_deep_agent, recursively handling nested subagents."""
-    return [_compile_agent(agent, model) for agent in subagents]
+    """Compile DeepAgent specs for create_deep_agent's subagents parameter."""
+    return [_compile_subagent(agent, model) for agent in subagents]

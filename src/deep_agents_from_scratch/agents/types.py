@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from typing import Any, NotRequired
+from typing import NotRequired, Required
 
-from deepagents.middleware.subagents import CompiledSubAgent, SubAgent as DeepAgentSubAgent
-from langchain_core.tools import BaseTool
+from deepagents.middleware.subagents import CompiledSubAgent, SubAgent
 
-DeepAgentTools = Sequence[BaseTool | Callable | dict[str, Any]]
+DeepAgentSubAgent = SubAgent
 
 
-class DeepAgent(DeepAgentSubAgent, total=False):
-    """Agent spec with optional tools and optional nested subagents."""
+class DeepAgent(SubAgent, total=False):
+    """Agent spec with optional nested subagents."""
 
-    tools: NotRequired[DeepAgentTools | None]
-    """Optional tools. Defaults to None (middleware-only agents)."""
-
+    id: Required[int]
     subagents: NotRequired[list[DeepAgent | CompiledSubAgent] | None]
     """Optional nested agents for delegation."""

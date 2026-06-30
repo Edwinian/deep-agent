@@ -4,7 +4,10 @@ from deep_agents_from_scratch.agents.types import DeepAgent
 from deep_agents_from_scratch.prompts import RESEARCHER_INSTRUCTIONS
 from deep_agents_from_scratch.tools import get_today_str, think_tool, web_search_tool
 
+RESEARCH_AGENT_ID = 1001
+
 RESEARCH_AGENT: DeepAgent = {
+    "id": RESEARCH_AGENT_ID,
     "name": "research-agent",
     "description": (
         "Delegate research to the sub-agent researcher. "
