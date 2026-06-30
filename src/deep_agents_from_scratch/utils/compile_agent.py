@@ -7,10 +7,11 @@ from langchain_core.language_models import BaseChatModel
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Checkpointer
 
-from deep_agents_from_scratch.agents.types import DeepAgent, ModelConfig
+from deep_agents_from_scratch.agents.types import DeepAgent, InterruptOn, ModelConfig
+from deep_agents_from_scratch.tools.default_interrupt_on import DEFAULT_INTERRUPT_ON
 from deep_agents_from_scratch.utils.get_checkpointer import CheckpointerType, get_checkpointer
 from deep_agents_from_scratch.utils.resolve_model import resolve_model
-from deep_agents_from_scratch.utils.compile_subagents import compile_subagents
+
 
 def compile_agent(
     agent: DeepAgent,
@@ -18,6 +19,7 @@ def compile_agent(
     model: str | BaseChatModel | None = None,
     model_config: ModelConfig | None = None,
     checkpointer: Checkpointer | None = None,
+    interrupt_on: InterruptOn | None = None,
 ) -> CompiledStateGraph:
     """Build a deep agent graph from a DeepAgent spec.
 
@@ -31,6 +33,7 @@ def compile_agent(
     )
     subagents = agent.get("subagents")
     if subagents:
+        from deep_agents_from_scratch.utils.compile_subagents import compile_subagents
 
         compiled_subagents = compile_subagents(
             subagents,
@@ -40,10 +43,17 @@ def compile_agent(
     else:
         compiled_subagents = None
 
+    resolved_interrupt_on = (
+        interrupt_on
+        if interrupt_on is not None
+        else agent.get("interrupt_on", DEFAULT_INTERRUPT_ON)
+    )
+
     return create_deep_agent(
         tools=agent.get("tools"),
         system_prompt=agent["system_prompt"],
         subagents=compiled_subagents,
         model=resolved_model,
         checkpointer=checkpointer or get_checkpointer(CheckpointerType.IN_MEMORY),
+        interrupt_on=resolved_interrupt_on,
     )

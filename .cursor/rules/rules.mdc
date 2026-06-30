@@ -9,3 +9,5 @@ The deep_agents_from_scratch directory under /src is the code for foundational a
 Import statements always on top of the file.
 
 When adding a new agent to agents folder, add it to the agent_registry
+
+When adding a new tool to tools folder, add it to the interrupt_on dict with false value

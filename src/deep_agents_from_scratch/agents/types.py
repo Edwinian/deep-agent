@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, Required, TypedDict
 
+from langchain.agents.middleware import InterruptOnConfig
 from deepagents.middleware.subagents import CompiledSubAgent, SubAgent
 
 DeepAgentSubAgent = SubAgent
+
+InterruptOn = dict[str, bool | InterruptOnConfig]
 
 
 class ModelConfig(TypedDict):
