@@ -4,7 +4,7 @@ alwaysApply: true
 
 Read all MD files
 
-The deep_agents_from_scratch directory under /src is the code for foundational architecture, intended for production. Remind user if anything falls short of production standard.
+The project root contains the foundational agent architecture, intended for production. Remind user if anything falls short of production standard.
 
 Import statements always on top of the file.
 

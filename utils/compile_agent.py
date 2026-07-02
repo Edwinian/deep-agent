@@ -1,0 +1,59 @@
+"""Compile a DeepAgent spec into a runnable deep agent graph."""
+
+from __future__ import annotations
+
+from deepagents import create_deep_agent
+from langchain_core.language_models import BaseChatModel
+from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import Checkpointer
+
+from agents.types import DeepAgent, InterruptOn, ModelConfig
+from tools.default_interrupt_on import DEFAULT_INTERRUPT_ON
+from utils.get_checkpointer import CheckpointerType, get_checkpointer
+from utils.resolve_model import resolve_model
+
+
+def compile_agent(
+    agent: DeepAgent,
+    *,
+    model: str | BaseChatModel | None = None,
+    model_config: ModelConfig | None = None,
+    checkpointer: Checkpointer | None = None,
+    interrupt_on: InterruptOn | None = None,
+) -> CompiledStateGraph:
+    """Build a deep agent graph from a DeepAgent spec.
+
+    Compiles nested subagents recursively, then calls create_deep_agent.
+    Use this for the main orchestrator agent or any DeepAgent with subagents.
+    """
+    resolved_model = resolve_model(
+        agent,
+        model=model,
+        model_config=model_config,
+    )
+    subagents = agent.get("subagents")
+    if subagents:
+        from utils.compile_subagents import compile_subagents
+
+        compiled_subagents = compile_subagents(
+            subagents,
+            default_model=resolved_model,
+            default_model_config=model_config,
+        )
+    else:
+        compiled_subagents = None
+
+    resolved_interrupt_on = (
+        interrupt_on
+        if interrupt_on is not None
+        else agent.get("interrupt_on", DEFAULT_INTERRUPT_ON)
+    )
+
+    return create_deep_agent(
+        tools=agent.get("tools"),
+        system_prompt=agent["system_prompt"],
+        subagents=compiled_subagents,
+        model=resolved_model,
+        checkpointer=checkpointer or get_checkpointer(CheckpointerType.IN_MEMORY),
+        interrupt_on=resolved_interrupt_on,
+    )

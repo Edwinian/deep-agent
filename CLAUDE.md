@@ -4,48 +4,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This repository contains educational materials for building deep agents from scratch using LangGraph. It demonstrates progressive agent architectures through a series of Jupyter notebooks, starting with basic TODO list functionality and advancing to full agents with file systems and subagent spawning.
+Production LangGraph deep-agent framework. Agent specs, tools, prompts, and compilation utilities live at the project root.
 
 ## Development Commands
 
 ### Environment Setup
 ```bash
-# Install dependencies using uv (preferred package manager)
-uv sync
-
-# Run Jupyter notebooks
-uv run jupyter notebook
-
-# Alternative: activate virtual environment
+python3 -m venv .venv
 source .venv/bin/activate
-jupyter notebook
+pip install -r requirements.txt
 ```
 
 ### Code Quality
 ```bash
-# Run linting with ruff (notebooks and source code)
-uv run ruff check
-uv run ruff check notebooks/
-
-# Auto-fix linting issues where possible
-uv run ruff check --fix
-uv run ruff format
-
-# Run type checking with mypy
-uv run mypy src/
-
-# Install dev dependencies (includes ruff and mypy)
-uv sync --extra dev
-```
-
-### LangGraph Studio Integration
-```bash
-# Start LangGraph Studio (if installed)
-langgraph up
-
-# The langgraph.json file defines two agents:
-# - studio_react_agent: "./src/deep-agents-from-scratch/studio_react_agent.py:agent"
-# - react_agent: "./src/deep-agents-from-scratch/react_agent.py:agent"
+# If ruff/mypy are installed in your environment
+ruff check .
+ruff format .
+mypy .
 ```
 
 ## Architecture
@@ -57,68 +32,47 @@ langgraph up
 - `Todo`: TypedDict for task tracking with status (pending/in_progress/completed)
 - `file_reducer`: Merges file dictionaries in state updates
 
-**Virtual File System (`file_tools.py`)**
-- `ls()`: List files in virtual filesystem stored in agent state
-- `read_file()`: Read file content with offset/limit support
-- `write_file()`: Create/overwrite files in virtual filesystem
-- `edit_file()`: Perform find-and-replace edits with exact string matching
+**Agents (`agents/`)**
+- `research_agent.py`: Research sub-agent with web search and reflection
+- `general_agent.py`: Orchestrator with todos, files, and sub-agent delegation
+- `agent_registry.py`: Registry of agent specs keyed by ID
 
-**Task Planning (`todo_tool.py`)**
-- `write_todos()`: Creates and updates structured task lists
-- Uses LangGraph `Command` type for state updates
-- Critical for context management and long-running tasks
+**Tools (`tools/`)**
+- `web_search_tool.py`: Tavily search with context offloading to virtual files
+- `think_tool.py`: Strategic reflection for research workflows
+- `todo_tools.py`: Read TODO list from agent state
+- `default_interrupt_on.py`: Human-in-the-loop interrupt defaults
 
-**Agent Implementations**
-- `react_agent.py`: Basic ReAct agent with internet search via Tavily
-- `studio_react_agent.py`: Studio-compatible version with detailed documentation
-
-### Tutorial Progression (Notebooks)
-
-1. **1_todo.ipynb**: TODO list tool for task planning and progress tracking
-2. **2_files.ipynb**: Virtual file system tools (read/write/edit/ls)  
-3. **3_subagents.ipynb**: Task delegation and context isolation via subagents
-4. **4_full_agent.ipynb**: Complete agent combining all tools and capabilities
+**Utils (`utils/`)**
+- `compile_agent.py`: Compile a `DeepAgent` spec into a runnable graph
+- `compile_subagents.py`: Recursively compile nested subagents
+- `display.py`: Rich formatting for messages and prompts
+- `get_checkpointer.py`: LangGraph checkpointer factory
 
 ### Key Patterns
 
-**Context Engineering Techniques:**
 - Context offloading to virtual files stored in state
-- TODO lists for planning and progress tracking  
+- TODO lists for planning and progress tracking
 - Subagent spawning for context quarantine
 - Task-specific prompt engineering
 
-**State Management:**
-- All file operations are virtual - files exist only in LangGraph state
-- Enables backtracking/restarting by preserving file system state
-- Todo list persisted across agent interactions
-
 ## Environment Variables
 
-Create `.env` file in project root with required API keys:
+Create `.env` in the project root:
 ```bash
-# Required for research agents with external search
 TAVILY_API_KEY=your_tavily_api_key_here
-
-# Required for model usage  
 ANTHROPIC_API_KEY=your_anthropic_api_key_here
+XAI_API_KEY=your_xai_api_key_here
 
-# Optional: For evaluation and tracing
+# Optional
 LANGSMITH_API_KEY=your_langsmith_api_key_here
 LANGSMITH_TRACING=true
 LANGSMITH_PROJECT=deep-agents-from-scratch
 ```
 
-## Testing
-
-No specific test framework is configured. Test agents by:
-1. Running notebooks interactively
-2. Testing via LangGraph Studio interface
-3. Direct Python script execution
-
 ## Important Notes
 
-- Virtual file system is ephemeral - exists only during agent execution
-- TODO tool should limit to ONE task in_progress at a time
-- File edit operations require exact string matching
-- Agents use Claude Sonnet 4 model by default
-- Rich formatting utilities in `notebooks/utils.py` for message display
+- Virtual file system is ephemeral — exists only during agent execution
+- When adding a new agent to `agents/`, register it in `agent_registry.py`
+- When adding a new tool to `tools/`, add it to `DEFAULT_INTERRUPT_ON` in `default_interrupt_on.py`
+- Import statements always at the top of the file
