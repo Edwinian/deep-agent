@@ -3,6 +3,7 @@
 import base64
 import logging
 import os
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -10,8 +11,7 @@ from typing import Any
 
 import httpx
 from dotenv import load_dotenv
-from langchain.chat_models import init_chat_model
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import InjectedToolArg, InjectedToolCallId, tool
 from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
@@ -28,16 +28,11 @@ from tavily.errors import (
 from typing_extensions import Annotated, Literal
 
 from deepagents.backends.utils import create_file_data
-from prompts import SUMMARIZE_WEB_SEARCH
-from state import DeepAgentState
 
 logger = logging.getLogger(__name__)
 
 _ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(_ENV_PATH, override=True)
-
-# Summarization model
-summarization_model = init_chat_model(model="xai:grok-3-mini")
 
 _tavily_client: TavilyClient | None = None
 
@@ -108,9 +103,9 @@ def _write_file_to_state(files: dict[str, Any], filename: str, content: str) -> 
         files[filename] = content
 
 class Summary(BaseModel):
-    """Schema for webpage content summarization."""
+    """Filename and text payload for a search result."""
     filename: str = Field(description="Name of the file to store.")
-    summary: str = Field(description="Key learnings from the webpage.")
+    summary: str = Field(description="Raw or excerpted webpage text.")
 
 def get_today_str() -> str:
     """Get current date in a human-readable format."""
@@ -153,35 +148,18 @@ def run_tavily_search(
         logger.exception("Unexpected error during Tavily search for query=%r", search_query)
         raise
 
-def summarize_webpage_content(webpage_content: str) -> Summary:
-    """Summarize webpage content using the configured summarization model.
+def _filename_from_title(title: str) -> str:
+    """Derive a safe markdown filename from a page title."""
+    slug = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_")
+    return f"{slug[:60] or 'search_result'}.md"
 
-    Args:
-        webpage_content: Raw webpage content to summarize
 
-    Returns:
-        Summary object with filename and summary
-    """
-    try:
-        # Set up structured output model for summarization
-        structured_model = summarization_model.with_structured_output(Summary)
-
-        # Generate summary
-        summary_and_filename = structured_model.invoke([
-            HumanMessage(content=SUMMARIZE_WEB_SEARCH.format(
-                webpage_content=webpage_content, 
-                date=get_today_str()
-            ))
-        ])
-
-        return summary_and_filename
-
-    except Exception:
-        # Return a basic summary object on failure
-        return Summary(
-            filename="search_result.md",
-            summary=webpage_content[:1000] + "..." if len(webpage_content) > 1000 else webpage_content
-        )
+def summarize_webpage_content(webpage_content: str, *, title: str = "") -> Summary:
+    """Return filename and raw content without LLM summarization."""
+    return Summary(
+        filename=_filename_from_title(title),
+        summary=webpage_content,
+    )
 
 
 _JS_ERROR_MARKERS = (
@@ -194,7 +172,7 @@ _JS_ERROR_MARKERS = (
 
 def _tavily_result_content(result: dict) -> str:
     """Return the best text Tavily already extracted for a hit."""
-    return result.get("content", "").strip()
+    return (result.get("raw_content") or result.get("content") or "").strip()
 
 
 def _is_low_value_content(text: str) -> bool:
@@ -206,7 +184,7 @@ def _is_low_value_content(text: str) -> bool:
 
 
 def process_search_results(results: dict) -> list[dict]:
-    """Process search results by summarizing content where available.
+    """Process search results into file-ready records with raw content.
 
     Prefers Tavily-extracted content (raw_content/content) over re-fetching URLs.
     Many sites return JS-disabled stubs to bare httpx clients even when Tavily
@@ -216,7 +194,7 @@ def process_search_results(results: dict) -> list[dict]:
         results: Tavily search results dictionary
 
     Returns:
-        List of processed results with summaries
+        List of processed results with filenames and raw content
     """
     processed_results = []
 
@@ -224,30 +202,32 @@ def process_search_results(results: dict) -> list[dict]:
         for result in results.get("results", []):
             url = result["url"]
             tavily_content = _tavily_result_content(result)
-            raw_content = tavily_content
-            print(f"raw_content: {raw_content}")
+            raw_content = ""
 
-            # if tavily_content and not _is_low_value_content(tavily_content):
-            #     raw_content = tavily_content
-            # else:
-            #     try:
-            #         response = client.get(url)
-            #         if response.status_code == 200:
-            #             fetched = markdownify(response.text)
-            #             if not _is_low_value_content(fetched):
-            #                 raw_content = fetched
-            #             elif tavily_content:
-            #                 raw_content = tavily_content
-            #         elif tavily_content:
-            #             raw_content = tavily_content
-            #     except (httpx.TimeoutException, httpx.RequestError):
-            #         if tavily_content:
-            #             raw_content = tavily_content
+            if tavily_content and not _is_low_value_content(tavily_content):
+                raw_content = tavily_content
+            else:
+                try:
+                    response = client.get(url)
+                    if response.status_code == 200:
+                        fetched = markdownify(response.text)
+                        if not _is_low_value_content(fetched):
+                            raw_content = fetched
+                        elif tavily_content:
+                            raw_content = tavily_content
+                    elif tavily_content:
+                        raw_content = tavily_content
+                except (httpx.TimeoutException, httpx.RequestError):
+                    if tavily_content:
+                        raw_content = tavily_content
 
-            # if not raw_content:
-            #     raw_content = result.get("content", "No content available.")
+            if not raw_content:
+                raw_content = result.get("content", "No content available.")
 
-            summary_obj = summarize_webpage_content(raw_content)
+            summary_obj = summarize_webpage_content(
+                raw_content,
+                title=result.get("title", ""),
+            )
 
             # uniquify file names
             uid = base64.urlsafe_b64encode(uuid.uuid4().bytes).rstrip(b"=").decode("ascii")[:8]
@@ -268,7 +248,7 @@ def process_search_results(results: dict) -> list[dict]:
 @tool(parse_docstring=True)
 def web_search_tool(
     query: str,
-    state: Annotated[DeepAgentState, InjectedState],
+    state: Annotated[dict[str, Any], InjectedState],
     tool_call_id: Annotated[str, InjectedToolCallId],
     max_results: Annotated[int, InjectedToolArg] = 1,
     topic: Annotated[Literal["general", "news", "finance"], InjectedToolArg] = "general",
@@ -330,26 +310,24 @@ def web_search_tool(
     summaries = []
 
     for result in processed_results:
-        # Use the AI-generated filename from summarization
         filename = result["filename"]
 
-        # Create file content with full details
         file_content = f"""# Search Result: {result['title']}
 
 **URL:** {result['url']}
 **Query:** {query}
 **Date:** {get_today_str()}
 
-## Summary
-{result['summary']}
-
-## Raw Content
-{result['raw_content'] if result['raw_content'] else 'No raw content available'}
+## Content
+{result['raw_content'] if result['raw_content'] else 'No content available'}
 """
 
         _write_file_to_state(files, filename, file_content)
         saved_files.append(filename)
-        summaries.append(f"- {filename}: {result['summary']}...")
+        preview = result["summary"]
+        if len(preview) > 300:
+            preview = preview[:300] + "..."
+        summaries.append(f"- {filename}: {preview}")
 
     # Create minimal summary for tool message - focus on what was collected
     summary_text = f"""🔍 Found {len(processed_results)} result(s) for '{query}':

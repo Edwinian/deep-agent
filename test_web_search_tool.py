@@ -1,10 +1,11 @@
-"""Standalone tester for Tavily search and web_search_tool.func.
+"""Standalone tester for Tavily search and web_search_tool integration paths.
 
 Usage:
     uv run python test_web_search_tool.py
     uv run python test_web_search_tool.py "LangGraph releases"
     uv run python test_web_search_tool.py --tavily-only "LangGraph releases"
-    uv run python test_web_search_tool.py --tool-only "LangGraph releases"
+    uv run python test_web_search_tool.py --func-only "LangGraph releases"
+    uv run python test_web_search_tool.py --tool-node-only "LangGraph releases"
 """
 
 from __future__ import annotations
@@ -18,9 +19,16 @@ from pathlib import Path
 from typing import Any, Literal
 
 from dotenv import load_dotenv
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.runnables.config import RunnableConfig
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
 from tavily import TavilyClient
+from typing_extensions import Annotated, TypedDict
+
+from deepagents.backends.utils import create_file_data
 
 _ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(_ENV_PATH, override=True)
@@ -93,6 +101,34 @@ def print_search_results(result: dict[str, Any]) -> None:
             print(f"      {preview}...")
 
 
+def _assert_web_search_success(
+    tool_msg: ToolMessage,
+    files: dict[str, Any],
+    *,
+    label: str,
+) -> None:
+    """Validate a successful web_search_tool ToolMessage and file writes."""
+    status = getattr(tool_msg, "status", "success")
+    print(f"status: {status}")
+    print(f"files written: {len(files)}")
+    for name in files:
+        print(f"  - {name}")
+
+    print("\nToolMessage preview:")
+    print(tool_msg.content[:500] if tool_msg.content else "(empty)")
+
+    if status == "error":
+        raise RuntimeError(f"{label} returned error: {tool_msg.content}")
+
+    junk_markers = ("javascript_disabled", "javascript is disabled", "no actual research")
+    combined = f"{list(files)} {tool_msg.content}".lower()
+    if any(marker in combined for marker in junk_markers):
+        raise RuntimeError(
+            f"{label} wrote low-value content (likely JS-disabled fetch). "
+            "Check process_search_results() Tavily fallback."
+        )
+
+
 def test_tavily(
     query: str,
     *,
@@ -105,7 +141,7 @@ def test_tavily(
     print(f"TAVILY_API_KEY loaded (length={len(key)}, prefix={key[:12]}...)")
     print(f"query: {query!r}")
     result = search_tavily(query, max_results=max_results, topic=topic)
-    print(f"result: {result}")
+    print_search_results(result)
 
 
 def test_web_search_tool_func(
@@ -114,7 +150,7 @@ def test_web_search_tool_func(
     max_results: int = 1,
     topic: Literal["general", "news", "finance"] = "general",
 ) -> None:
-    """Step 2: Full web_search_tool via .func (summarize, file write, Command)."""
+    """Step 2: Full web_search_tool via .func (bypasses LangGraph injection)."""
     mod = _load_web_search_module()
     web_search_tool = mod.web_search_tool
 
@@ -139,30 +175,72 @@ def test_web_search_tool_func(
     if tool_msg is None:
         raise RuntimeError("No ToolMessage in Command update")
 
-    status = getattr(tool_msg, "status", "success")
-    print(f"status: {status}")
-    print(f"files written: {len(files)}")
-    for name in files:
-        print(f"  - {name}")
+    _assert_web_search_success(tool_msg, files, label="web_search_tool.func")
 
-    print("\nToolMessage preview:")
-    print(tool_msg.content[:500] if tool_msg.content else "(empty)")
 
-    if status == "error":
-        raise RuntimeError(f"web_search_tool returned error: {tool_msg.content}")
+def test_tool_node_with_filedata(
+    query: str,
+    *,
+    max_results: int = 1,
+    topic: Literal["general", "news", "finance"] = "general",
+) -> None:
+    """Step 3: ToolNode with deepagents FileData state (production agent path)."""
+    mod = _load_web_search_module()
+    web_search_tool = mod.web_search_tool
 
-    junk_markers = ("javascript_disabled", "javascript is disabled", "no actual research")
-    combined = f"{list(files)} {tool_msg.content}".lower()
-    if any(marker in combined for marker in junk_markers):
-        raise RuntimeError(
-            "web_search_tool wrote low-value content (likely JS-disabled fetch). "
-            "Check process_search_results() Tavily fallback."
-        )
+    class State(TypedDict):
+        messages: Annotated[list, add_messages]
+        files: dict[str, Any]
+        todos: list[Any]
+
+    _print_header("3. ToolNode + FileData state (agent-like)")
+    tool_call_id = f"test-{uuid.uuid4()}"
+    ai = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": web_search_tool.name,
+                "args": {"query": query, "max_results": max_results, "topic": topic},
+                "id": tool_call_id,
+                "type": "tool_call",
+            }
+        ],
+    )
+    # Mimics state after write_file in general-agent before research subagent runs.
+    state: State = {
+        "messages": [ai],
+        "files": {"/user_request.txt": create_file_data("prior agent file")},
+        "todos": [],
+    }
+    config: RunnableConfig = {"configurable": {"thread_id": str(uuid.uuid4())}}
+
+    builder = StateGraph(State)
+    builder.add_node("tools", ToolNode([web_search_tool]))
+    builder.add_edge(START, "tools")
+    builder.add_edge("tools", END)
+    result = builder.compile().invoke(state, config=config)
+
+    tool_msg = next(
+        (
+            m
+            for m in result.get("messages", [])
+            if isinstance(m, ToolMessage) and m.name == web_search_tool.name
+        ),
+        None,
+    )
+    if tool_msg is None:
+        raise RuntimeError("No web_search_tool ToolMessage in ToolNode result")
+
+    _assert_web_search_success(
+        tool_msg,
+        result.get("files", {}),
+        label="ToolNode + FileData",
+    )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Test Tavily search and web_search_tool independently",
+        description="Test Tavily search and web_search_tool integration paths",
     )
     parser.add_argument("query", nargs="?", default=DEFAULT_QUERY)
     parser.add_argument("--max-results", type=int, default=1)
@@ -171,34 +249,49 @@ def main() -> int:
         choices=["general", "news", "finance"],
         default="general",
     )
-    parser.add_argument("--tavily-only", action="store_true", help="Only test Tavily API")
+    parser.add_argument("--tavily-only", action="store_true", help="Only step 1")
+    parser.add_argument(
+        "--func-only",
+        action="store_true",
+        help="Only step 2 (web_search_tool.func)",
+    )
     parser.add_argument(
         "--tool-only",
         action="store_true",
-        help="Only test web_search_tool.func",
+        help="Alias for --func-only",
+    )
+    parser.add_argument(
+        "--tool-node-only",
+        action="store_true",
+        help="Only step 3 (ToolNode + FileData state)",
     )
     args = parser.parse_args()
 
-    if args.tavily_only and args.tool_only:
-        parser.error("Use at most one of --tavily-only and --tool-only")
+    if args.tool_only:
+        args.func_only = True
+
+    only_flags = sum([args.tavily_only, args.func_only, args.tool_node_only])
+    if only_flags > 1:
+        parser.error("Use at most one of --tavily-only, --func-only, --tool-node-only")
+
+    run_kwargs = {
+        "max_results": args.max_results,
+        "topic": args.topic,
+    }
 
     try:
         if args.tavily_only:
-            test_tavily(args.query, max_results=args.max_results, topic=args.topic)
-        elif args.tool_only:
+            test_tavily(args.query, **run_kwargs)
+        elif args.func_only:
             _check_tavily_key()
-            test_web_search_tool_func(
-                args.query,
-                max_results=args.max_results,
-                topic=args.topic,
-            )
+            test_web_search_tool_func(args.query, **run_kwargs)
+        elif args.tool_node_only:
+            _check_tavily_key()
+            test_tool_node_with_filedata(args.query, **run_kwargs)
         else:
-            test_tavily(args.query, max_results=args.max_results, topic=args.topic)
-            test_web_search_tool_func(
-                args.query,
-                max_results=args.max_results,
-                topic=args.topic,
-            )
+            test_tavily(args.query, **run_kwargs)
+            test_web_search_tool_func(args.query, **run_kwargs)
+            test_tool_node_with_filedata(args.query, **run_kwargs)
     except Exception as exc:
         print(f"\nFAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
