@@ -4,13 +4,14 @@ from datetime import datetime
 
 from agents.research_agent import RESEARCH_AGENT
 from agents.types import DeepAgent
+from constants.model_name import ModelName
 from prompts import (
     FILE_USAGE_INSTRUCTIONS,
     SUBAGENT_USAGE_INSTRUCTIONS,
     TODO_USAGE_INSTRUCTIONS,
 )
 
-DEFAULT_MODEL = "xai:grok-3-mini"
+DEFAULT_MODEL = ModelName.GROK_3_MINI.with_provider()
 MAX_CONCURRENT_RESEARCH_UNITS = 3
 MAX_RESEARCHER_ITERATIONS = 3
 

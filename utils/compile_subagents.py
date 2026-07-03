@@ -35,7 +35,7 @@ def _to_subagent_spec(agent: DeepAgent) -> SubAgent:
 
 def _compile_subagent(
     agent: DeepAgent | CompiledSubAgent,
-    default_model: str | BaseChatModel | None,
+    default_model: str | None,
     default_model_config: ModelConfig | None = None,
 ) -> SubAgent | CompiledSubAgent:
     """Compile a single subagent spec, recursively handling nested subagents."""
@@ -67,7 +67,7 @@ def _compile_subagent(
 def compile_subagents(
     subagents: list[DeepAgent | CompiledSubAgent],
     *,
-    default_model: str | BaseChatModel | None = None,
+    default_model: str | None = None,
     default_model_config: ModelConfig | None = None,
 ) -> list[SubAgent | CompiledSubAgent]:
     """Compile DeepAgent specs for create_deep_agent's subagents parameter."""

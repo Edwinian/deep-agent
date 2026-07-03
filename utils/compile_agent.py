@@ -16,7 +16,7 @@ from utils.resolve_model import resolve_model
 def compile_agent(
     agent: DeepAgent,
     *,
-    model: str | BaseChatModel | None = None,
+    model: str | None = None,
     model_config: ModelConfig | None = None,
     checkpointer: Checkpointer | None = None,
     interrupt_on: InterruptOn | None = None,

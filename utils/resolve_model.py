@@ -9,7 +9,7 @@ from agents.types import DeepAgent, ModelConfig, model_config_kwargs
 
 
 def resolve_model(
-    agent: DeepAgent,
+    agent: DeepAgent | None = None,
     *,
     model: str | BaseChatModel | None = None,
     model_config: ModelConfig | None = None,
@@ -18,8 +18,12 @@ def resolve_model(
     resolved_config = (
         model_config
         if model_config is not None
-        else agent.get("model_config")
+        else agent.get("model_config") if agent is not None else None
     )
     if resolved_config is not None:
         return init_chat_model(**model_config_kwargs(resolved_config))
+    if agent is None:
+        if model is None or isinstance(model, BaseChatModel):
+            return model
+        return init_chat_model(model=model)
     return agent.get("model", model)
