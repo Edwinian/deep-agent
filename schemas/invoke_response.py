@@ -5,6 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
+from langchain.agents.middleware.human_in_the_loop import ActionRequest
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -91,15 +92,6 @@ class FileEntry(BaseModel):
     modified_at: str
 
 
-class ActionRequest(BaseModel):
-    """Tool action awaiting human review."""
-
-    name: str
-    args: dict[str, Any]
-    description: str
-    tool_call_id: str | None = None
-
-
 class ReviewConfig(BaseModel):
     """Review options for an interrupted tool action."""
 
@@ -110,7 +102,7 @@ class ReviewConfig(BaseModel):
 class InterruptValue(BaseModel):
     """Human-in-the-loop interrupt payload."""
 
-    action_requests: list[ActionRequest]
+    action_requests: list[dict[str, Any]]
     review_configs: list[ReviewConfig]
 
 
@@ -145,8 +137,8 @@ class InvokeResponse(BaseModel):
     thread_id: str
     agent_id: int
     status: InvokeStatus
-    permission_message: str | None = None
-    result: InvokeResult
+    messages: list[SerializedMessage]
+    action_requests: list[ActionRequest] | None = None
 
 
 class StreamMode(StrEnum):

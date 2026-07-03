@@ -18,9 +18,9 @@ class DecisionType(StrEnum):
 
 
 class Permission(TypedDict):
-    """Client-provided approval for a pending tool call."""
+    """Client-provided approval for pending tool calls, keyed by tool name."""
 
-    tool_call_id: str
+    name: str
     decision: DecisionType
     edit_instruction: NotRequired[str | None]
     respond_instruction: NotRequired[str | None]

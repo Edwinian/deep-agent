@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import HTTPException
 from langchain.agents.middleware.human_in_the_loop import (
     Action,
+    ActionRequest,
     ApproveDecision,
     Decision,
     EditDecision,
@@ -15,10 +16,28 @@ from langchain.agents.middleware.human_in_the_loop import (
     RejectDecision,
     RespondDecision,
 )
-from langchain_core.messages import AIMessage, BaseMessage, ToolCall
-from langgraph.types import Command, Interrupt as LangGraphInterrupt
+from langchain_core.messages import ToolCall
+from langgraph.types import Command, Interrupt as LangGraphInterrupt, StateSnapshot
 
 from schemas.invoke_request import DecisionType, Permission
+
+
+def collect_pending_interrupts(snapshot: StateSnapshot) -> tuple[LangGraphInterrupt, ...]:
+    """Collect pending interrupts from the root graph and nested subgraph tasks."""
+    collected: list[LangGraphInterrupt] = list(snapshot.interrupts)
+    seen_ids: set[str] = {interrupt.id for interrupt in collected}
+
+    def walk(state: StateSnapshot) -> None:
+        for task in state.tasks:
+            for interrupt in task.interrupts:
+                if interrupt.id not in seen_ids:
+                    seen_ids.add(interrupt.id)
+                    collected.append(interrupt)
+            if isinstance(task.state, StateSnapshot):
+                walk(task.state)
+
+    walk(snapshot)
+    return tuple(collected)
 
 
 def is_resume_request(
@@ -30,93 +49,44 @@ def is_resume_request(
     return thread_id is not None and permissions is not None
 
 
-def find_tool_call_id(action_request: dict[str, Any], messages: list[Any]) -> str | None:
-    """Match an interrupt action request to a tool call id in message history."""
-    for message in reversed(_iter_ai_messages(messages)):
-        for tool_call in message.tool_calls:
-            if (
-                tool_call["name"] == action_request.get("name")
-                and tool_call["args"] == action_request.get("args")
-            ):
-                return tool_call["id"]
-    return None
+def _interrupt_value(interrupt: LangGraphInterrupt | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(interrupt, LangGraphInterrupt):
+        value = interrupt.value
+    else:
+        value = interrupt.get("value", {})
+    return value if isinstance(value, dict) else {}
 
 
-def enrich_interrupt_tool_call_ids(
-    serialized: dict[str, Any],
-    messages: list[Any],
-) -> None:
-    """Attach tool_call_id to each action request in serialized interrupts."""
-    interrupts = serialized.get("__interrupt__")
-    if not interrupts:
-        return
+def collect_action_requests(
+    interrupts: tuple[LangGraphInterrupt, ...] | list[Any],
+) -> list[ActionRequest]:
+    """Flatten LangGraph interrupt payloads into client-facing action requests."""
+    action_requests: list[ActionRequest] = []
 
     for interrupt in interrupts:
-        if isinstance(interrupt, LangGraphInterrupt):
-            value = interrupt.value
-        else:
-            value = interrupt.get("value", {})
-
-        if not isinstance(value, dict):
-            continue
-
+        value = _interrupt_value(interrupt)
         for action_request in value.get("action_requests", []):
-            tool_call_id = find_tool_call_id(action_request, messages)
-            if tool_call_id is not None:
-                action_request["tool_call_id"] = tool_call_id
-
-
-def build_permission_message(interrupts: list[Any]) -> str:
-    """Build a client-facing summary for pending tool approvals."""
-    lines = ["Tool execution requires your approval before the agent can continue:"]
-
-    for interrupt in interrupts:
-        if isinstance(interrupt, LangGraphInterrupt):
-            value = interrupt.value
-        else:
-            value = interrupt.get("value", {})
-
-        if not isinstance(value, dict):
-            continue
-
-        for action_request in value.get("action_requests", []):
-            name = action_request.get("name", "unknown_tool")
+            item: ActionRequest = {
+                "name": action_request["name"],
+                "args": action_request["args"],
+            }
             description = action_request.get("description")
-            tool_call_id = action_request.get("tool_call_id")
-            suffix = f" (tool_call_id={tool_call_id})" if tool_call_id else ""
-            if description:
-                lines.append(f"- {name}{suffix}: {description}")
-            else:
-                lines.append(f"- {name}{suffix}: {action_request.get('args', {})}")
+            if description is not None:
+                item["description"] = description
+            action_requests.append(item)
 
-    lines.append(
-        "Reply with the same thread_id and permissions to approve, edit, reject, or respond."
-    )
-    return "\n".join(lines)
+    return action_requests
 
 
 def build_resume_command(
     interrupts: tuple[LangGraphInterrupt, ...] | list[Any],
     permissions: list[Permission],
-    messages: list[Any],
 ) -> Command:
     """Build a LangGraph ``Command(resume=...)`` from client permissions.
 
-    Mapping overview (client ``permissions`` → LangGraph resume payload):
-
-    1. Index client permissions by ``tool_call_id`` (the id from the AI message).
-    2. For each pending ``Interrupt`` from checkpoint state:
-       - ``Interrupt.id`` is the LangGraph interrupt key (NOT a tool_call_id).
-       - ``Interrupt.value.action_requests`` lists tools awaiting human review.
-    3. Match each action request to its tool call in ``messages`` (see
-       ``_match_tool_calls``) so we know which ``tool_call_id`` to look up.
-    4. Convert each matched ``Permission`` into a HITL ``Decision`` (see
-       ``_permission_to_decision``). Decisions must be in the same order as
-       ``action_requests`` — LangGraph applies them positionally.
-    5. Attach decisions under the interrupt id::
-         {interrupt_id: {"decisions": [decision_0, decision_1, ...]}}
-    6. Return ``Command(resume=...)`` — a single HITLResponse when there is one
-       interrupt, otherwise a map keyed by interrupt id.
+    Client permissions are keyed by tool ``name``. One permission entry applies
+    to every pending ``action_request`` with that name. LangGraph consumes the
+    resulting ``decisions`` list in the same order as ``action_requests``.
     """
     if not interrupts:
         raise HTTPException(
@@ -124,151 +94,58 @@ def build_resume_command(
             detail="No interrupted tool calls found for this thread.",
         )
 
-    # Client permissions are keyed by tool_call_id; each pending tool call must
-    # supply exactly one permission entry before we can resume.
-    permissions_by_id = {permission["tool_call_id"]: permission for permission in permissions}
+    permissions_by_name = {permission["name"]: permission for permission in permissions}
     resume_payload: dict[str, HITLResponse] = {}
 
     for interrupt in interrupts:
         if isinstance(interrupt, LangGraphInterrupt):
             interrupt_id = interrupt.id
-            value = interrupt.value
         else:
             interrupt_id = interrupt["id"]
-            value = interrupt.get("value", {})
 
-        action_requests = value.get("action_requests", [])
-        # Resolve action_requests → concrete tool_calls from thread history.
-        interrupted_tool_calls = _match_tool_calls(action_requests, messages)
-        if len(interrupted_tool_calls) != len(action_requests):
+        action_requests = _interrupt_value(interrupt).get("action_requests", [])
+        required_names = {action_request["name"] for action_request in action_requests}
+        missing_names = required_names - permissions_by_name.keys()
+        if missing_names:
+            missing = ", ".join(sorted(missing_names))
             raise HTTPException(
                 status_code=400,
-                detail="Could not match all interrupted tool calls in thread history.",
+                detail=f"Missing permission for tool name(s): {missing}.",
             )
 
         decisions: list[Decision] = []
-        for tool_call, action_request in zip(interrupted_tool_calls, action_requests):
-            tool_call_id = tool_call["id"]
-            # Look up the client permission for this pending tool call.
-            permission = permissions_by_id.get(tool_call_id)
-            if permission is None:
-                tool_call_id = action_request.get("tool_call_id", tool_call_id)
-                permission = permissions_by_id.get(tool_call_id)
-
-            if permission is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Missing permission for tool_call_id={tool_call_id!r}.",
+        for action_request in action_requests:
+            permission = permissions_by_name[action_request["name"]]
+            decisions.append(
+                _permission_to_decision(
+                    permission,
+                    _action_request_as_tool_call(action_request),
                 )
+            )
 
-            # Permission → HITL decision (approve / edit / reject / respond).
-            decisions.append(_permission_to_decision(permission, tool_call))
-
-        # LangGraph routes resume input by interrupt id, not tool_call_id.
         resume_payload[interrupt_id] = {"decisions": decisions}
 
-    # Single interrupt: pass HITLResponse shape directly. Multiple: map by id.
     if len(resume_payload) == 1:
         return Command(resume=next(iter(resume_payload.values())))
 
     return Command(resume=resume_payload)
 
 
-def _iter_ai_messages(messages: list[Any]) -> list[AIMessage]:
-    """Normalize thread history into AIMessage objects that expose tool_calls."""
-    ai_messages: list[AIMessage] = []
-    for message in messages:
-        if isinstance(message, AIMessage):
-            ai_messages.append(message)
-        elif isinstance(message, dict):
-            data = message.get("data", message)
-            if data.get("type") == "ai":
-                tool_calls = data.get("tool_calls", [])
-                ai_messages.append(
-                    AIMessage(
-                        content=data.get("content", ""),
-                        tool_calls=tool_calls,
-                        id=data.get("id"),
-                    )
-                )
-    return ai_messages
-
-
-def _match_tool_calls(
-    action_requests: list[dict[str, Any]],
-    messages: list[Any],
-) -> list[ToolCall]:
-    """Align each interrupt action_request with its tool call in message history.
-
-    HumanInTheLoopMiddleware stores pending tools in ``action_requests`` without
-    guaranteed tool_call_id fields. This function returns the corresponding
-    ``tool_calls`` entries in the same order, which ``build_resume_command`` then
-    uses to join client ``permissions`` (keyed by tool_call_id) to HITL decisions.
-    """
-    matched: list[ToolCall] = []
-    seen_ids: set[str] = set()
-
-    for action_request in action_requests:
-        tool_call_id = action_request.get("tool_call_id")
-        if tool_call_id:
-            # Preferred path: action_request already carries tool_call_id from our
-            # serialized invoke response.
-            tool_call = _find_tool_call_by_id(tool_call_id, messages)
-            if tool_call is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Unknown tool_call_id={tool_call_id!r} in thread history.",
-                )
-            matched.append(tool_call)
-            seen_ids.add(tool_call_id)
-            continue
-
-        # Fallback: locate the tool call by exact name + args match.
-        for message in reversed(_iter_ai_messages(messages)):
-            for tool_call in message.tool_calls:
-                if tool_call["id"] in seen_ids:
-                    continue
-                if (
-                    tool_call["name"] == action_request.get("name")
-                    and tool_call["args"] == action_request.get("args")
-                ):
-                    matched.append(tool_call)
-                    seen_ids.add(tool_call["id"])
-                    break
-            else:
-                continue
-            break
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Could not find tool call for interrupted action "
-                    f"{action_request.get('name')!r}."
-                ),
-            )
-
-    return matched
-
-
-def _find_tool_call_by_id(tool_call_id: str, messages: list[Any]) -> ToolCall | None:
-    """Return the tool call dict for ``tool_call_id`` from the newest AI message first."""
-    for message in reversed(_iter_ai_messages(messages)):
-        for tool_call in message.tool_calls:
-            if tool_call["id"] == tool_call_id:
-                return tool_call
-    return None
+def _action_request_as_tool_call(action_request: dict[str, Any]) -> ToolCall:
+    """Build a minimal tool call shape for decision conversion."""
+    return ToolCall(
+        type="tool_call",
+        name=action_request["name"],
+        args=action_request["args"],
+        id="",
+    )
 
 
 def _permission_to_decision(
     permission: Permission,
     tool_call: ToolCall,
 ) -> Decision:
-    """Convert one client Permission into one HumanInTheLoopMiddleware decision.
-
-    This is the final step in the permissions → resume mapping. Each decision
-    is consumed by LangGraph in the same order as the interrupted tool calls
-    for that interrupt batch.
-    """
+    """Convert one client Permission into one HumanInTheLoopMiddleware decision."""
     decision = permission["decision"]
     if isinstance(decision, str):
         decision = DecisionType(decision)
@@ -280,7 +157,6 @@ def _permission_to_decision(
         reject_decision: RejectDecision = {"type": DecisionType.REJECT}
         reject_reason = permission.get("reject_reason") or permission.get("edit_instruction")
         if reject_reason:
-            # Permission.reject_reason maps to RejectDecision.message.
             reject_decision["message"] = reject_reason
         return reject_decision
 
@@ -289,7 +165,7 @@ def _permission_to_decision(
         if not message:
             raise HTTPException(
                 status_code=400,
-                detail=f"respond_instruction is required for tool_call_id={permission['tool_call_id']!r}.",
+                detail=f"respond_instruction is required for tool {permission['name']!r}.",
             )
         return RespondDecision(type=DecisionType.RESPOND, message=message)
 
@@ -298,7 +174,7 @@ def _permission_to_decision(
         if not instruction:
             raise HTTPException(
                 status_code=400,
-                detail=f"edit_instruction is required for tool_call_id={permission['tool_call_id']!r}.",
+                detail=f"edit_instruction is required for tool {permission['name']!r}.",
             )
         edited_action: Action = {
             "name": tool_call["name"],
@@ -308,7 +184,7 @@ def _permission_to_decision(
 
     raise HTTPException(
         status_code=400,
-        detail=f"Unsupported decision={decision!r} for tool_call_id={permission['tool_call_id']!r}.",
+        detail=f"Unsupported decision={decision!r} for tool {permission['name']!r}.",
     )
 
 
@@ -316,11 +192,7 @@ def _parse_edit_instruction(
     instruction: str,
     original_args: Action["args"],
 ) -> Action["args"]:
-    """Build edited tool args from ``edit_instruction``.
-
-    Accepts either JSON args (full override) or plain text (mapped onto a
-    common arg field like ``query`` for search tools).
-    """
+    """Build edited tool args from ``edit_instruction``."""
     try:
         parsed = json.loads(instruction)
     except json.JSONDecodeError:

@@ -90,16 +90,24 @@ def _open_async_checkpointer(
     return _run_async(_enter_async_context(context))
 
 
+_MEMORY_SAVER: MemorySaver | None = None
+
+
 def get_checkpointer(checkpointer_type: CheckpointerType) -> BaseCheckpointSaver:
     """Return a checkpointer for the given backend type.
 
-    ``IN_MEMORY`` is ready for ``graph.compile(checkpointer=...)``. For async savers, prefer
-    ``async with async_sqlite_checkpointer()`` or
+    ``IN_MEMORY`` returns a process-wide singleton so thread checkpoints survive
+    across repeated ``compile_agent`` calls in the same server process.
+
+    For async savers, prefer ``async with async_sqlite_checkpointer()`` or
     ``async with async_postgres_checkpointer()`` directly. This factory
     uses ``asyncio.run`` when no event loop is active.
     """
+    global _MEMORY_SAVER
     if checkpointer_type is CheckpointerType.IN_MEMORY:
-        return MemorySaver()
+        if _MEMORY_SAVER is None:
+            _MEMORY_SAVER = MemorySaver()
+        return _MEMORY_SAVER
 
     if checkpointer_type is CheckpointerType.ASYNC_SQLITE:
         return _open_async_checkpointer(async_sqlite_checkpointer())

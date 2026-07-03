@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
 from dotenv import load_dotenv
+
+load_dotenv(override=True)
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import BaseMessage, HumanMessage, messages_to_dict
@@ -20,24 +24,24 @@ from agents.types import ModelConfig
 from schemas.invoke_request import InvokeAgent
 from schemas.invoke_response import (
     InvokeResponse,
-    InvokeResult,
     InvokeStatus,
+    SerializedMessage,
     StreamChunk,
     StreamMode,
 )
 from utils.compile_agent import compile_agent
+from utils.get_checkpointer import CheckpointerType, get_checkpointer
 from utils.hitl import (
-    build_permission_message,
     build_resume_command,
-    enrich_interrupt_tool_call_ids,
+    collect_action_requests,
+    collect_pending_interrupts,
     is_resume_request,
 )
-
-load_dotenv()
 
 app = FastAPI(title="Deep Agents API")
 
 _agent_cache: dict[int, CompiledStateGraph] = {}
+_shared_checkpointer = get_checkpointer(CheckpointerType.IN_MEMORY)
 
 
 def _get_compiled_agent(agent_id: int, model_config: ModelConfig | None) -> CompiledStateGraph:
@@ -46,10 +50,17 @@ def _get_compiled_agent(agent_id: int, model_config: ModelConfig | None) -> Comp
         raise HTTPException(status_code=404, detail=f"Unknown agent_id: {agent_id}")
 
     if model_config is not None:
-        return compile_agent(agent_spec, model_config=model_config)
+        return compile_agent(
+            agent_spec,
+            model_config=model_config,
+            checkpointer=_shared_checkpointer,
+        )
 
     if agent_id not in _agent_cache:
-        _agent_cache[agent_id] = compile_agent(agent_spec)
+        _agent_cache[agent_id] = compile_agent(
+            agent_spec,
+            checkpointer=_shared_checkpointer,
+        )
     return _agent_cache[agent_id]
 
 
@@ -72,17 +83,15 @@ def _serialize_stream_value(value: Any) -> Any:
     return value
 
 
-def _serialize_invoke_result(
-    result: dict[str, Any],
-    *,
-    messages: list[Any] | None = None,
-) -> InvokeResult:
-    serialized = _serialize_stream_value(result)
-    enrich_interrupt_tool_call_ids(
-        serialized,
-        messages if messages is not None else result.get("messages", []),
-    )
-    return InvokeResult.model_validate(serialized)
+def _serialize_messages(messages: list[Any]) -> list[SerializedMessage]:
+    """Serialize LangChain messages for the client-facing invoke response."""
+    if not messages:
+        return []
+    if isinstance(messages[0], BaseMessage):
+        message_dicts = messages_to_dict(messages)
+    else:
+        message_dicts = messages
+    return [SerializedMessage.model_validate(message) for message in message_dicts]
 
 
 def _has_pending_interrupts(result: dict[str, Any]) -> bool:
@@ -96,23 +105,22 @@ def _build_invoke_response(
     agent_id: int,
     raw_result: dict[str, Any],
 ) -> InvokeResponse:
-    messages = raw_result.get("messages", [])
-    invoke_result = _serialize_invoke_result(raw_result, messages=messages)
+    serialized_messages = _serialize_messages(raw_result.get("messages", []))
 
     if _has_pending_interrupts(raw_result):
         return InvokeResponse(
             thread_id=thread_id,
             agent_id=agent_id,
             status=InvokeStatus.AWAITING_TOOL_PERMISSION,
-            permission_message=build_permission_message(raw_result["__interrupt__"]),
-            result=invoke_result,
+            messages=serialized_messages,
+            action_requests=collect_action_requests(raw_result["__interrupt__"]),
         )
 
     return InvokeResponse(
         thread_id=thread_id,
         agent_id=agent_id,
         status=InvokeStatus.COMPLETED,
-        result=invoke_result,
+        messages=serialized_messages,
     )
 
 
@@ -128,17 +136,21 @@ async def _run_agent(
         thread_id=payload.get("thread_id"),
         permissions=permissions,
     ):
-        snapshot = await agent.aget_state(config)
-        if not snapshot.interrupts:
+        snapshot = await agent.aget_state(config, subgraphs=True)
+        pending_interrupts = collect_pending_interrupts(snapshot)
+        if not pending_interrupts:
             raise HTTPException(
                 status_code=400,
-                detail="No interrupted tool calls found for this thread.",
+                detail=(
+                    "No interrupted tool calls found for this thread. "
+                    "The server may have restarted (in-memory checkpoints are cleared on reload) "
+                    "or the thread_id is wrong."
+                ),
             )
 
         resume_input = build_resume_command(
-            snapshot.interrupts,
+            pending_interrupts,
             permissions or [],
-            snapshot.values.get("messages", []),
         )
         return await agent.ainvoke(resume_input, config=config)
 
@@ -215,11 +227,20 @@ async def stream(payload: InvokeAgent) -> StreamingResponse:
         thread_id=payload.get("thread_id"),
         permissions=permissions,
     ):
-        snapshot = await agent.aget_state(config)
+        snapshot = await agent.aget_state(config, subgraphs=True)
+        pending_interrupts = collect_pending_interrupts(snapshot)
+        if not pending_interrupts:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No interrupted tool calls found for this thread. "
+                    "The server may have restarted (in-memory checkpoints are cleared on reload) "
+                    "or the thread_id is wrong."
+                ),
+            )
         input_state = build_resume_command(
-            snapshot.interrupts,
+            pending_interrupts,
             permissions or [],
-            snapshot.values.get("messages", []),
         )
     else:
         message = payload.get("message")
@@ -245,4 +266,4 @@ async def stream(payload: InvokeAgent) -> StreamingResponse:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=False)

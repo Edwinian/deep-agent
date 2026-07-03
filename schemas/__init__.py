@@ -1,8 +1,9 @@
 """API request and response schemas."""
 
+from langchain.agents.middleware.human_in_the_loop import ActionRequest
+
 from schemas.invoke_request import DecisionType, InvokeAgent, Permission
 from schemas.invoke_response import (
-    ActionRequest,
     FileEntry,
     Interrupt,
     InterruptDecision,

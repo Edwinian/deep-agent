@@ -1,9 +1,12 @@
 """Web search tool and content processing utilities for research agents."""
 
+import base64
+import logging
 import os
+import uuid
 from datetime import datetime
 from pathlib import Path
-import uuid, base64
+from typing import Any
 
 import httpx
 from dotenv import load_dotenv
@@ -15,21 +18,77 @@ from langgraph.types import Command
 from markdownify import markdownify
 from pydantic import BaseModel, Field
 from tavily import TavilyClient
-from typing import Any
-
-from deepagents.backends.utils import create_file_data
-
+from tavily.errors import (
+    BadRequestError,
+    ForbiddenError,
+    InvalidAPIKeyError,
+    MissingAPIKeyError,
+    UsageLimitExceededError,
+)
 from typing_extensions import Annotated, Literal
 
+from deepagents.backends.utils import create_file_data
 from prompts import SUMMARIZE_WEB_SEARCH
 from state import DeepAgentState
 
-load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=True)
+logger = logging.getLogger(__name__)
+
+_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(_ENV_PATH, override=True)
 
 # Summarization model
 summarization_model = init_chat_model(model="xai:grok-3-mini")
-tavily_client = TavilyClient()
 
+_tavily_client: TavilyClient | None = None
+
+_TAVILY_API_ERRORS = (
+    MissingAPIKeyError,
+    InvalidAPIKeyError,
+    BadRequestError,
+    ForbiddenError,
+    UsageLimitExceededError,
+)
+
+
+def _tavily_api_key() -> str | None:
+    """Return a trimmed Tavily API key from the environment."""
+    key = os.getenv("TAVILY_API_KEY")
+    if key is None:
+        return None
+    key = key.strip()
+    return key or None
+
+
+def _get_tavily_client() -> TavilyClient:
+    """Create or reuse a Tavily client after validating configuration."""
+    global _tavily_client
+    api_key = _tavily_api_key()
+    if not api_key:
+        raise MissingAPIKeyError()
+    if _tavily_client is None or _tavily_client.api_key != api_key:
+        _tavily_client = TavilyClient(api_key=api_key)
+    return _tavily_client
+
+
+def _format_tavily_error(exc: Exception) -> str:
+    """Turn Tavily failures into actionable tool error text."""
+    if isinstance(exc, MissingAPIKeyError):
+        return (
+            "Tavily search is not configured: TAVILY_API_KEY is missing. "
+            f"Set it in {_ENV_PATH} and restart the server."
+        )
+    if isinstance(exc, InvalidAPIKeyError):
+        key = _tavily_api_key() or ""
+        hint = ""
+        if key.startswith("tvly-") and len(key) < 45:
+            hint = (
+                " The key looks truncated (too short). Copy the full key "
+                "from https://app.tavily.com/ and paste it on one line in .env."
+            )
+        return f"Tavily rejected TAVILY_API_KEY as invalid or unauthorized.{hint}"
+    if isinstance(exc, _TAVILY_API_ERRORS):
+        return f"Tavily API error: {exc}"
+    return f"{type(exc).__name__}: {exc}"
 
 def _is_deepagents_file_entry(file_entry: Any) -> bool:
     """Return True if a state files entry uses deepagents FileData format."""
@@ -73,15 +132,26 @@ def run_tavily_search(
 
     Returns:
         Search results dictionary
-    """
-    result = tavily_client.search(
-        search_query,
-        max_results=max_results,
-        include_raw_content=include_raw_content,
-        topic=topic
-    )
 
-    return result
+    Raises:
+        MissingAPIKeyError: If TAVILY_API_KEY is unset.
+        InvalidAPIKeyError: If Tavily rejects the API key.
+        BadRequestError, ForbiddenError, UsageLimitExceededError: Other Tavily failures.
+    """
+    client = _get_tavily_client()
+    try:
+        return client.search(
+            search_query,
+            max_results=max_results,
+            include_raw_content=include_raw_content,
+            topic=topic,
+        )
+    except _TAVILY_API_ERRORS:
+        logger.exception("Tavily search failed for query=%r", search_query)
+        raise
+    except Exception:
+        logger.exception("Unexpected error during Tavily search for query=%r", search_query)
+        raise
 
 def summarize_webpage_content(webpage_content: str) -> Summary:
     """Summarize webpage content using the configured summarization model.
@@ -114,8 +184,33 @@ def summarize_webpage_content(webpage_content: str) -> Summary:
         )
 
 
+_JS_ERROR_MARKERS = (
+    "javascript is disabled",
+    "enable javascript",
+    "javascript required",
+    "requires javascript",
+)
+
+
+def _tavily_result_content(result: dict) -> str:
+    """Return the best text Tavily already extracted for a hit."""
+    return result.get("content", "").strip()
+
+
+def _is_low_value_content(text: str) -> bool:
+    """True when page text is empty or a known client-side error stub."""
+    if not text or len(text) < 80:
+        return True
+    lowered = text.lower()
+    return any(marker in lowered for marker in _JS_ERROR_MARKERS)
+
+
 def process_search_results(results: dict) -> list[dict]:
     """Process search results by summarizing content where available.
+
+    Prefers Tavily-extracted content (raw_content/content) over re-fetching URLs.
+    Many sites return JS-disabled stubs to bare httpx clients even when Tavily
+    already has usable text.
 
     Args:
         results: Tavily search results dictionary
@@ -125,49 +220,47 @@ def process_search_results(results: dict) -> list[dict]:
     """
     processed_results = []
 
-    # Create a client for HTTP requests with timeout
-    HTTPX_CLIENT = httpx.Client(timeout=30.0)  # Add 30 second timeout
+    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+        for result in results.get("results", []):
+            url = result["url"]
+            tavily_content = _tavily_result_content(result)
+            raw_content = tavily_content
+            print(f"raw_content: {raw_content}")
 
-    for result in results.get('results', []):
+            # if tavily_content and not _is_low_value_content(tavily_content):
+            #     raw_content = tavily_content
+            # else:
+            #     try:
+            #         response = client.get(url)
+            #         if response.status_code == 200:
+            #             fetched = markdownify(response.text)
+            #             if not _is_low_value_content(fetched):
+            #                 raw_content = fetched
+            #             elif tavily_content:
+            #                 raw_content = tavily_content
+            #         elif tavily_content:
+            #             raw_content = tavily_content
+            #     except (httpx.TimeoutException, httpx.RequestError):
+            #         if tavily_content:
+            #             raw_content = tavily_content
 
-        # Get url 
-        url = result['url']
+            # if not raw_content:
+            #     raw_content = result.get("content", "No content available.")
 
-        # Read url with timeout and error handling
-        try:
-            response = HTTPX_CLIENT.get(url)
+            summary_obj = summarize_webpage_content(raw_content)
 
-            if response.status_code == 200:
-                # Convert HTML to markdown
-                raw_content = markdownify(response.text)
-                summary_obj = summarize_webpage_content(raw_content)
-            else:
-                # Use Tavily's generated summary
-                raw_content = result.get('raw_content', '')
-                summary_obj = Summary(
-                    filename="URL_error.md",
-                    summary=result.get('content', 'Error reading URL; try another search.')
-                )
-        except (httpx.TimeoutException, httpx.RequestError) as e:
-            # Handle timeout or connection errors gracefully
-            raw_content = result.get('raw_content', '')
-            summary_obj = Summary(
-                filename="connection_error.md",
-                summary=result.get('content', f'Could not fetch URL (timeout/connection error). Try another search.')
-            )
+            # uniquify file names
+            uid = base64.urlsafe_b64encode(uuid.uuid4().bytes).rstrip(b"=").decode("ascii")[:8]
+            name, ext = os.path.splitext(summary_obj.filename)
+            summary_obj.filename = f"{name}_{uid}{ext}"
 
-        # uniquify file names
-        uid = base64.urlsafe_b64encode(uuid.uuid4().bytes).rstrip(b"=").decode("ascii")[:8]
-        name, ext = os.path.splitext(summary_obj.filename)
-        summary_obj.filename = f"{name}_{uid}{ext}"
-
-        processed_results.append({
-            'url': result['url'],
-            'title': result['title'],
-            'summary': summary_obj.summary,
-            'filename': summary_obj.filename,
-            'raw_content': raw_content,
-        })
+            processed_results.append({
+                "url": result["url"],
+                "title": result["title"],
+                "summary": summary_obj.summary,
+                "filename": summary_obj.filename,
+                "raw_content": raw_content,
+            })
 
     return processed_results
 
@@ -195,16 +288,41 @@ def web_search_tool(
     Returns:
         Command that saves full results to files and provides minimal summary
     """
-    # Execute search
-    search_results = run_tavily_search(
-        query,
-        max_results=max_results,
-        topic=topic,
-        include_raw_content=True,
-    ) 
+    try:
+        search_results = run_tavily_search(
+            query,
+            max_results=max_results,
+            topic=topic,
+            include_raw_content=True,
+        )
+        processed_results = process_search_results(search_results)
+    except Exception as exc:
+        error_text = _format_tavily_error(exc)
+        logger.error("web_search_tool failed for query=%r: %s", query, error_text)
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        error_text,
+                        tool_call_id=tool_call_id,
+                        status="error",
+                    )
+                ],
+            }
+        )
 
-    # Process and summarize results
-    processed_results = process_search_results(search_results)
+    if not processed_results:
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        f"No search results returned for '{query}'. Try a different query.",
+                        tool_call_id=tool_call_id,
+                        status="error",
+                    )
+                ],
+            }
+        )
 
     # Save each result to a file and prepare summary
     files = state.get("files", {})
