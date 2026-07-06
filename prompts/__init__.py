@@ -11,7 +11,7 @@ from prompts.researcher_instructions import (
 from prompts.subagent_usage_instructions import (
     SUBAGENT_USAGE_INSTRUCTIONS,
 )
-from prompts.summarize_web_search import SUMMARIZE_WEB_SEARCH
+from prompts.summarize import SUMMARIZE
 from prompts.task_description_prefix import (
     TASK_DESCRIPTION_PREFIX,
 )
@@ -31,7 +31,7 @@ __all__ = [
     "READ_FILE_DESCRIPTION",
     "RESEARCHER_INSTRUCTIONS",
     "SUBAGENT_USAGE_INSTRUCTIONS",
-    "SUMMARIZE_WEB_SEARCH",
+    "SUMMARIZE",
     "TASK_DESCRIPTION_PREFIX",
     "TODO_USAGE_INSTRUCTIONS",
     "WRITE_FILE_DESCRIPTION",

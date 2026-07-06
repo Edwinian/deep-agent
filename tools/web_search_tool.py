@@ -16,7 +16,6 @@ from langchain_core.tools import InjectedToolArg, InjectedToolCallId, tool
 from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
 from markdownify import markdownify
-from pydantic import BaseModel, Field
 from tavily import TavilyClient
 from tavily.errors import (
     BadRequestError,
@@ -28,6 +27,7 @@ from tavily.errors import (
 from typing_extensions import Annotated, Literal
 
 from deepagents.backends.utils import create_file_data
+from tools.summarize_tool import Summary, summarize_content
 
 logger = logging.getLogger(__name__)
 
@@ -102,11 +102,6 @@ def _write_file_to_state(files: dict[str, Any], filename: str, content: str) -> 
     else:
         files[filename] = content
 
-class Summary(BaseModel):
-    """Filename and text payload for a search result."""
-    filename: str = Field(description="Name of the file to store.")
-    summary: str = Field(description="Raw or excerpted webpage text.")
-
 def get_today_str() -> str:
     """Get current date in a human-readable format."""
     return datetime.now().strftime("%a %b %-d, %Y")
@@ -155,11 +150,15 @@ def _filename_from_title(title: str) -> str:
 
 
 def summarize_webpage_content(webpage_content: str, *, title: str = "") -> Summary:
-    """Return filename and raw content without LLM summarization."""
-    return Summary(
-        filename=_filename_from_title(title),
-        summary=webpage_content,
-    )
+    """Summarize webpage content using summarize_tool."""
+    try:
+        return summarize_content(webpage_content)
+    except Exception:
+        logger.exception("Summarization failed for webpage content")
+        return Summary(
+            filename=_filename_from_title(title),
+            summary=webpage_content,
+        )
 
 
 _JS_ERROR_MARKERS = (
