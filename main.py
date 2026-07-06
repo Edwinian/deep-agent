@@ -37,6 +37,7 @@ from utils.hitl import (
     collect_pending_interrupts,
     is_resume_request,
 )
+from utils.langfuse_tracing import with_langfuse_config
 
 app = FastAPI(title="Deep Agents API")
 
@@ -130,6 +131,17 @@ async def _run_agent(
     *,
     config: RunnableConfig,
 ) -> dict[str, Any]:
+    thread_id = (
+        payload.get("thread_id")
+        or config.get("configurable", {}).get("thread_id")
+        or ""
+    )
+    config = with_langfuse_config(
+        config,
+        thread_id=str(thread_id),
+        agent_id=payload["agent_id"],
+    )
+
     permissions = payload.get("permissions")
 
     if is_resume_request(
@@ -220,7 +232,11 @@ async def stream(payload: InvokeAgent) -> StreamingResponse:
     agent_id = payload["agent_id"]
     agent = _get_compiled_agent(agent_id, model_config)
     thread_id = payload.get("thread_id") or str(uuid.uuid4())
-    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+    config: RunnableConfig = with_langfuse_config(
+        {"configurable": {"thread_id": thread_id}},
+        thread_id=thread_id,
+        agent_id=agent_id,
+    )
 
     permissions = payload.get("permissions")
     if is_resume_request(

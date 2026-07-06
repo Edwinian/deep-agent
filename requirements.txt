@@ -17,3 +17,4 @@ deepagents>=0.0.3
 langgraph-checkpoint-sqlite>=3.0.3
 langgraph-checkpoint-postgres>=3.0.5
 psycopg[binary]>=3.3.4
+langfuse

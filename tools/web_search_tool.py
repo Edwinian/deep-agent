@@ -95,12 +95,21 @@ def _state_uses_deepagents_files(files: dict[str, Any]) -> bool:
     return not files or any(_is_deepagents_file_entry(entry) for entry in files.values())
 
 
+def _normalize_virtual_path(filename: str) -> str:
+    """Ensure paths match deepagents virtual FS convention (absolute, leading `/`)."""
+    path = filename.strip().replace("\\", "/")
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return path
+
+
 def _write_file_to_state(files: dict[str, Any], filename: str, content: str) -> None:
     """Write a file entry compatible with scratch and create_deep_agent state."""
+    path = _normalize_virtual_path(filename)
     if _state_uses_deepagents_files(files):
-        files[filename] = create_file_data(content)
+        files[path] = create_file_data(content)
     else:
-        files[filename] = content
+        files[path] = content
 
 def get_today_str() -> str:
     """Get current date in a human-readable format."""
@@ -152,11 +161,15 @@ def _filename_from_title(title: str) -> str:
 def summarize_webpage_content(webpage_content: str, *, title: str = "") -> Summary:
     """Summarize webpage content using summarize_tool."""
     try:
-        return summarize_content(webpage_content)
+        result = summarize_content(webpage_content)
+        return Summary(
+            filename=_normalize_virtual_path(result.filename),
+            summary=result.summary,
+        )
     except Exception:
         logger.exception("Summarization failed for webpage content")
         return Summary(
-            filename=_filename_from_title(title),
+            filename=_normalize_virtual_path(_filename_from_title(title)),
             summary=webpage_content,
         )
 
@@ -231,7 +244,7 @@ def process_search_results(results: dict) -> list[dict]:
             # uniquify file names
             uid = base64.urlsafe_b64encode(uuid.uuid4().bytes).rstrip(b"=").decode("ascii")[:8]
             name, ext = os.path.splitext(summary_obj.filename)
-            summary_obj.filename = f"{name}_{uid}{ext}"
+            summary_obj.filename = _normalize_virtual_path(f"{name}_{uid}{ext}")
 
             processed_results.append({
                 "url": result["url"],
