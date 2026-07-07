@@ -185,7 +185,7 @@ class StreamMessageKind(StrEnum):
 
 
 class StreamTextChunk(BaseModel):
-    """One streamed delta or lifecycle event from ``stream_events(version="v3")``."""
+    """One SSE event payload from ``stream_events(version="v3")``."""
 
     thread_id: str
     agent_id: int

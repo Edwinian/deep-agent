@@ -37,8 +37,9 @@ class StreamService:
 
     @staticmethod
     def emit_stream_chunk(chunk: StreamTextChunk) -> str:
-        """Serialize one NDJSON stream chunk."""
-        return json.dumps(chunk.model_dump(mode="json"), ensure_ascii=False) + "\n"
+        """Serialize one SSE ``data`` frame."""
+        payload = json.dumps(chunk.model_dump(mode="json"), ensure_ascii=False)
+        return f"data: {payload}\n\n"
 
     @staticmethod
     def _tool_message_from_output(output: Any) -> ToolMessage | None:
@@ -819,5 +820,10 @@ class StreamService:
                 config=config,
                 input_state=input_state,
             ),
-            media_type="application/x-ndjson",
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )

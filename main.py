@@ -28,7 +28,7 @@ async def invoke(payload: InvokeAgent) -> InvokeResponse:
 
 @app.post("/stream")
 async def stream(payload: InvokeAgent) -> StreamingResponse:
-    """Compile the requested agent and stream v3 message and tool-call projections."""
+    """Compile the requested agent and stream v3 projections over SSE."""
     return await stream_service.stream(payload)
 
 

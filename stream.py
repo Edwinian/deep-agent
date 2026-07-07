@@ -16,6 +16,27 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_MESSAGE = "What are the latest developments in LangGraph?"
 
 
+def _json_payload(payload: dict) -> dict:
+    """Return a JSON-serializable copy of a stream request payload."""
+    return json.loads(
+        json.dumps(
+            payload,
+            default=lambda item: item.value if hasattr(item, "value") else item,
+        )
+    )
+
+
+def iter_sse_data_events(lines: Iterator[str]) -> Iterator[dict]:
+    """Parse ``data:`` lines from a Server-Sent Events response body."""
+    for line in lines:
+        if not line or not line.startswith("data:"):
+            continue
+        payload = line[5:].lstrip()
+        if not payload:
+            continue
+        yield json.loads(payload)
+
+
 def stream_agent(
     *,
     base_url: str = DEFAULT_BASE_URL,
@@ -26,7 +47,7 @@ def stream_agent(
     permissions: list[dict] | None = None,
     timeout: float = 300.0,
 ) -> Iterator[dict]:
-    """Call the /stream endpoint and yield each NDJSON text chunk."""
+    """Call the POST /stream SSE endpoint and yield each event payload."""
     resolved_thread_id = thread_id or str(uuid.uuid4())
     payload: dict = {
         "agent_id": agent_id,
@@ -42,14 +63,11 @@ def stream_agent(
     with httpx.stream(
         "POST",
         f"{base_url.rstrip('/')}/stream",
-        json=payload,
+        json=_json_payload(payload),
         timeout=timeout,
     ) as response:
         response.raise_for_status()
-        for line in response.iter_lines():
-            if not line:
-                continue
-            yield json.loads(line)
+        yield from iter_sse_data_events(response.iter_lines())
 
 
 class _StreamPrinter:
