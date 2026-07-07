@@ -11,13 +11,12 @@ import httpx
 from agents.general_agent import GENERAL_AGENT_ID
 from schemas.invoke_request import DecisionType, Permission
 from stream import (
-    _interrupts_from_values_event,
-    _messages_from_values_event,
     _print_chunk_summary,
     _print_final_summary,
+    accumulate_root_reply,
     stream_agent,
+    stream_status_from_chunk,
 )
-from utils.hitl import collect_action_requests
 
 DEFAULT_THREAD_ID = "915491e2-2060-41da-8e3e-6e1e629993ec"
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
@@ -55,10 +54,12 @@ def permit_stream_round(
     timeout: float = 300.0,
     verbose: bool = False,
 ) -> dict[str, Any]:
-    """Resume an interrupted thread via /stream and return an invoke-shaped summary."""
+    """Resume an interrupted thread via /stream and accumulate streamed text."""
     chunk_count = 0
-    last_messages: list[dict[str, Any]] = []
-    last_interrupts: list[Any] = []
+    accumulated_text = ""
+    awaiting_tool_permission = False
+    action_requests: list[dict[str, Any]] = []
+    run_status: str | None = None
 
     for chunk in stream_agent(
         base_url=base_url,
@@ -75,25 +76,32 @@ def permit_stream_round(
         else:
             _print_chunk_summary(chunk)
 
-        event = chunk.get("event") or {}
-        if chunk.get("stream_mode") == "values" and isinstance(event, dict):
-            messages = _messages_from_values_event(event)
-            if messages:
-                last_messages = messages
-            interrupts = _interrupts_from_values_event(event)
-            if interrupts:
-                last_interrupts = interrupts
+        if chunk.get("kind") == "interrupt":
+            awaiting_tool_permission = True
+            action_requests = chunk.get("action_requests") or []
 
-    action_requests = collect_action_requests(last_interrupts) if last_interrupts else []
-    status = "awaiting_tool_permission" if action_requests else "completed"
+        status = stream_status_from_chunk(chunk)
+        if status is not None:
+            run_status = status
+            if status == "awaiting_tool_permission":
+                awaiting_tool_permission = True
+                action_requests = chunk.get("action_requests") or []
 
+        accumulated_text = accumulate_root_reply(accumulated_text, chunk)
+
+    if awaiting_tool_permission:
+        status = "awaiting_tool_permission"
+    elif run_status:
+        status = run_status
+    else:
+        status = "completed"
     return {
         "thread_id": thread_id,
         "agent_id": agent_id,
         "status": status,
-        "messages": last_messages,
+        "run_status": run_status,
         "action_requests": action_requests,
-        "last_interrupts": last_interrupts,
+        "accumulated_text": accumulated_text,
         "chunk_count": chunk_count,
     }
 
@@ -124,6 +132,7 @@ def _parse_args() -> tuple[str, str, int, bool]:
 
 
 def main() -> int:
+    """Run permit rounds over /stream until completed or max_rounds is reached."""
     base_url, thread_id, max_rounds, verbose = _parse_args()
     permissions = DEFAULT_PERMISSIONS
 
@@ -199,9 +208,11 @@ def main() -> int:
 
     _print_final_summary(
         thread_id=result.get("thread_id"),
-        last_messages=result.get("messages") or [],
-        last_interrupts=result.get("last_interrupts") or [],
+        accumulated_text=str(result.get("accumulated_text", "")),
         chunk_count=result.get("chunk_count", 0),
+        awaiting_tool_permission=result.get("status") == "awaiting_tool_permission",
+        pending_action_count=len(result.get("action_requests") or []),
+        run_status=result.get("run_status"),
     )
 
     return 0 if result.get("status") == "completed" else 1

@@ -7,13 +7,10 @@ import json
 import sys
 import uuid
 from collections.abc import Iterator
-from typing import Any
 
 import httpx
 
 from agents.general_agent import GENERAL_AGENT_ID
-from schemas.invoke_request import Permission
-from utils.hitl import collect_action_requests
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_MESSAGE = "What are the latest developments in LangGraph?"
@@ -26,10 +23,10 @@ def stream_agent(
     message: str = DEFAULT_MESSAGE,
     thread_id: str | None = None,
     model_config: dict | None = None,
-    permissions: list[Permission] | None = None,
+    permissions: list[dict] | None = None,
     timeout: float = 300.0,
 ) -> Iterator[dict]:
-    """Call the /stream endpoint and yield each NDJSON chunk."""
+    """Call the /stream endpoint and yield each NDJSON text chunk."""
     resolved_thread_id = thread_id or str(uuid.uuid4())
     payload: dict = {
         "agent_id": agent_id,
@@ -55,155 +52,207 @@ def stream_agent(
             yield json.loads(line)
 
 
-def _message_text(message: dict[str, Any]) -> str:
-    """Return visible text from a serialized message."""
-    data = message.get("data") or {}
-    content = (data.get("content") or "").strip()
-    if content:
-        return content
+class _StreamPrinter:
+    """Stateful printer that mirrors the event-streaming doc output."""
 
-    additional = data.get("additional_kwargs") or {}
-    reasoning = (additional.get("reasoning_content") or "").strip()
-    return reasoning
+    def __init__(self) -> None:
+        self._subagent_prefix_printed = False
 
+    def print_chunk(self, chunk: dict) -> None:
+        kind = chunk.get("kind", "text")
+        source = chunk.get("source", "agent")
 
-def _last_ai_message(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
-    for message in reversed(messages):
-        msg_type = message.get("type")
-        if msg_type == "ai" or (message.get("data") or {}).get("type") == "ai":
-            return message
-    return None
+        if kind == "subagent_started":
+            self._subagent_prefix_printed = False
+            subagent_name = chunk.get("subagent_name")
+            if subagent_name:
+                print(f"{subagent_name}: ", end="", flush=True)
+                self._subagent_prefix_printed = True
+            return
 
+        if kind == "subagent_finished":
+            print()
+            self._subagent_prefix_printed = False
+            return
 
-def _messages_from_values_event(event: dict[str, Any]) -> list[dict[str, Any]]:
-    messages = event.get("messages")
-    return messages if isinstance(messages, list) else []
+        if source != "subagent":
+            self._subagent_prefix_printed = False
 
+        if kind == "reasoning":
+            delta = chunk.get("delta", "")
+            if delta:
+                prefix = self._subagent_reasoning_prefix(chunk)
+                print(f"{prefix}[thinking] {delta}", end="", flush=True)
+            return
 
-def _interrupts_from_values_event(event: dict[str, Any]) -> list[Any]:
-    interrupts = event.get("__interrupt__")
-    return interrupts if isinstance(interrupts, list) else []
+        if kind == "text":
+            delta = chunk.get("delta", "")
+            if delta:
+                self._maybe_print_subagent_prefix(chunk)
+                print(delta, end="", flush=True)
+            return
 
+        if kind == "message_tool_call_chunk":
+            prefix = self._subagent_label(chunk)
+            print(f"{prefix}tool call chunk: {chunk.get('tool_call_chunk')}")
+            return
 
-def _summarize_update_event(event: dict[str, Any]) -> str:
-    parts: list[str] = []
-    for key, value in event.items():
-        if value is None:
-            parts.append(key)
-            continue
-        if key == "model" and isinstance(value, dict):
-            ai_message = _last_ai_message(_messages_from_values_event(value))
-            if ai_message is None:
-                parts.append("model")
-                continue
-            data = ai_message.get("data") or {}
-            tool_calls = data.get("tool_calls") or []
+        if kind == "message_tool_calls_finalized":
+            tool_calls = chunk.get("tool_calls")
             if tool_calls:
-                tool_names = ", ".join(call.get("name", "?") for call in tool_calls)
-                parts.append(f"model -> tool_calls: {tool_names}")
-            else:
-                text = _message_text(ai_message)
-                preview = text.replace("\n", " ")[:80]
-                parts.append(f"model -> {preview!r}" if preview else "model")
-            continue
-        if key == "tools" and isinstance(value, dict):
-            tool_messages = _messages_from_values_event(value)
-            if tool_messages:
-                names = ", ".join(
-                    (msg.get("data") or {}).get("name", "?") for msg in tool_messages
-                )
-                parts.append(f"tools: {names}")
-            else:
-                parts.append("tools")
-            continue
-        parts.append(key)
-    return ", ".join(parts)
+                prefix = self._subagent_label(chunk)
+                print(f"{prefix}finalized tool calls: {tool_calls}")
+            return
+
+        if kind == "tool_call_started":
+            tool_name = chunk.get("tool_name", "unknown")
+            tool_input = chunk.get("input", {})
+            prefix = self._subagent_label(chunk)
+            print(f"{prefix}{tool_name}({tool_input})")
+            return
+
+        if kind == "tool_call_output_delta":
+            delta = chunk.get("delta", "")
+            if delta:
+                self._maybe_print_subagent_prefix(chunk)
+                print(delta, end="", flush=True)
+            return
+
+        if kind == "tool_call_finished":
+            print()
+            output = chunk.get("output")
+            error = chunk.get("error")
+            prefix = self._subagent_label(chunk)
+            if output is not None:
+                print(f"{prefix}{output}", end=" ")
+            if error:
+                print(f"{prefix}{error}", end="")
+            print()
+            return
+
+        if kind == "interrupt":
+            prefix = self._subagent_label(chunk)
+            action_requests = chunk.get("action_requests") or []
+            interrupt_ids = chunk.get("interrupt_ids") or []
+            print()
+            print(f"{prefix}Awaiting tool approval ({len(action_requests)} action(s))")
+            if interrupt_ids:
+                print(f"{prefix}interrupt_ids: {interrupt_ids}")
+            for index, action in enumerate(action_requests, start=1):
+                name = action.get("name", "unknown")
+                args = action.get("args", {})
+                print(f"{prefix}  {index}. {name}: {args!r}")
+            print()
+            return
+
+        if kind == "message_finished":
+            return
+
+        if kind == "run_finished":
+            return
+
+    def _maybe_print_subagent_prefix(self, chunk: dict) -> None:
+        if chunk.get("source") != "subagent" or self._subagent_prefix_printed:
+            return
+        subagent_name = chunk.get("subagent_name")
+        if subagent_name:
+            print(f"{subagent_name}: ", end="", flush=True)
+            self._subagent_prefix_printed = True
+
+    def _subagent_label(self, chunk: dict) -> str:
+        if chunk.get("source") != "subagent":
+            return ""
+        subagent_name = chunk.get("subagent_name")
+        if not subagent_name:
+            return "[subagent] "
+        return f"[{subagent_name}] "
+
+    def _subagent_reasoning_prefix(self, chunk: dict) -> str:
+        if chunk.get("source") != "subagent":
+            return ""
+        return self._subagent_label(chunk)
 
 
-def _print_chunk_summary(chunk: dict[str, Any]) -> None:
-    stream_mode = chunk.get("stream_mode", "?")
-    graph = chunk.get("graph") or []
-    graph_label = "/".join(graph) if graph else "root"
-    event = chunk.get("event") or {}
+def _print_chunk_summary(chunk: dict) -> None:
+    """Print one streamed chunk, matching the event-streaming doc output."""
+    _STREAM_PRINTER.print_chunk(chunk)
 
-    if stream_mode == "updates" and isinstance(event, dict):
-        print(f"[{graph_label}] updates: {_summarize_update_event(event)}")
-        return
 
-    if stream_mode == "values" and isinstance(event, dict):
-        messages = _messages_from_values_event(event)
-        ai_message = _last_ai_message(messages)
-        if ai_message is not None:
-            text = _message_text(ai_message)
-            preview = text.replace("\n", " ")[:80]
-            if preview:
-                print(f"[{graph_label}] values: last_ai={preview!r}")
-            else:
-                print(f"[{graph_label}] values: state updated ({len(messages)} messages)")
-        else:
-            print(f"[{graph_label}] values: state updated")
+_STREAM_PRINTER = _StreamPrinter()
+
+
+def accumulate_root_reply(accumulated_text: str, chunk: dict) -> str:
+    """Accumulate the root agent reply from streamed chunks."""
+    if chunk.get("source", "agent") != "agent":
+        return accumulated_text
+
+    kind = chunk.get("kind")
+    if kind == "text":
+        return accumulated_text + str(chunk.get("delta", ""))
+
+    if kind == "message_finished":
+        content = chunk.get("content")
+        if isinstance(content, str) and content:
+            if not accumulated_text:
+                return content
+            if content.startswith(accumulated_text):
+                return content
+        return accumulated_text
+
+    if kind == "run_finished":
+        reply = chunk.get("reply")
+        if isinstance(reply, str) and reply:
+            return reply
+
+    return accumulated_text
+
+
+def stream_status_from_chunk(chunk: dict) -> str | None:
+    """Return invoke-equivalent status when a run_finished chunk arrives."""
+    if chunk.get("kind") != "run_finished":
+        return None
+    status = chunk.get("status")
+    return status if isinstance(status, str) else None
 
 
 def _print_final_summary(
     *,
     thread_id: str | None,
-    last_messages: list[dict[str, Any]],
-    last_interrupts: list[Any],
+    accumulated_text: str,
     chunk_count: int,
+    awaiting_tool_permission: bool = False,
+    pending_action_count: int = 0,
+    run_status: str | None = None,
 ) -> None:
+    """Print end-of-run summary after text streaming completes."""
+    print()
     print()
     print("=" * 72)
     print("Stream summary")
     print("=" * 72)
     if thread_id:
         print(f"thread_id: {thread_id}")
-
-    action_requests = collect_action_requests(last_interrupts) if last_interrupts else []
-    if action_requests:
-        print(f"status: awaiting_tool_permission ({len(action_requests)} pending)")
-        for index, action_request in enumerate(action_requests, start=1):
-            name = action_request["name"]
-            args = action_request.get("args", {})
-            query = args.get("query")
-            if query is not None:
-                print(f"  {index}. {name}: {query!r}")
-            else:
-                print(f"  {index}. {name}: {args!r}")
-        print("Resume with: python permit.py", thread_id or "<thread_id>")
-        print("         or: python permit_stream.py", thread_id or "<thread_id>")
-        print("=" * 72)
-        return
-
-    ai_message = _last_ai_message(last_messages)
-    print("status: completed")
-    print()
-    print("Agent response:")
-    if ai_message is None:
-        print("  (no AI message in final state)")
+    if awaiting_tool_permission:
+        print("status: awaiting_tool_permission")
+        print(f"pending actions: {pending_action_count}")
+        print()
+        print("Resume with permit_stream.py and this thread_id.")
     else:
-        text = _message_text(ai_message)
-        data = ai_message.get("data") or {}
-        content = (data.get("content") or "").strip()
-        if content:
-            print(content)
-        elif text:
-            print("  (no final text content; last model output was reasoning only)")
-            print()
-            print(text)
+        print(f"status: {run_status or 'completed'}")
+        print()
+        print("Agent response:")
+        if accumulated_text.strip():
+            print(accumulated_text.strip())
         else:
-            print("  (empty — model stopped without a user-facing reply)")
-            tool_calls = data.get("tool_calls") or []
-            if tool_calls:
-                names = ", ".join(call.get("name", "?") for call in tool_calls)
-                print(f"  Pending tool calls: {names}")
-
+            print("  (no text deltas received)")
     print()
     print(f"Received {chunk_count} chunk(s).")
     print("=" * 72)
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Stream agent events from POST /stream.")
+    """Parse CLI arguments for the stream test client."""
+    parser = argparse.ArgumentParser(description="Stream agent text from POST /stream.")
     parser.add_argument("base_url", nargs="?", default=DEFAULT_BASE_URL)
     parser.add_argument("message", nargs="?", default=DEFAULT_MESSAGE)
     parser.add_argument(
@@ -216,6 +265,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """Run the stream test client and print streamed text."""
     args = _parse_args()
     base_url = args.base_url
     message = args.message
@@ -227,8 +277,10 @@ def main() -> int:
 
     thread_id: str | None = None
     chunk_count = 0
-    last_messages: list[dict[str, Any]] = []
-    last_interrupts: list[Any] = []
+    accumulated_text = ""
+    awaiting_tool_permission = False
+    pending_action_count = 0
+    run_status: str | None = None
 
     try:
         for chunk in stream_agent(base_url=base_url, message=message):
@@ -239,6 +291,17 @@ def main() -> int:
                 print(f"thread_id={thread_id!r}")
                 print()
 
+            if chunk.get("kind") == "interrupt":
+                awaiting_tool_permission = True
+                pending_action_count = len(chunk.get("action_requests") or [])
+
+            status = stream_status_from_chunk(chunk)
+            if status is not None:
+                run_status = status
+                if status == "awaiting_tool_permission":
+                    awaiting_tool_permission = True
+                    pending_action_count = len(chunk.get("action_requests") or [])
+
             if args.verbose:
                 print(f"--- chunk {chunk_count} ---")
                 print(json.dumps(chunk, indent=2, ensure_ascii=False))
@@ -246,14 +309,7 @@ def main() -> int:
             else:
                 _print_chunk_summary(chunk)
 
-            event = chunk.get("event") or {}
-            if chunk.get("stream_mode") == "values" and isinstance(event, dict):
-                messages = _messages_from_values_event(event)
-                if messages:
-                    last_messages = messages
-                interrupts = _interrupts_from_values_event(event)
-                if interrupts:
-                    last_interrupts = interrupts
+            accumulated_text = accumulate_root_reply(accumulated_text, chunk)
 
     except httpx.HTTPStatusError as exc:
         print(f"HTTP {exc.response.status_code}: {exc.response.text}", file=sys.stderr)
@@ -269,11 +325,13 @@ def main() -> int:
 
     _print_final_summary(
         thread_id=thread_id,
-        last_messages=last_messages,
-        last_interrupts=last_interrupts,
+        accumulated_text=accumulated_text,
         chunk_count=chunk_count,
+        awaiting_tool_permission=awaiting_tool_permission,
+        pending_action_count=pending_action_count,
+        run_status=run_status,
     )
-    return 0 if not last_interrupts else 1
+    return 0
 
 
 if __name__ == "__main__":
