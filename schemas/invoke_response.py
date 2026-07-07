@@ -206,6 +206,7 @@ class StreamTextChunk(BaseModel):
     tool_name: str | None = None
     input: dict[str, Any] | None = None
     output: Any | None = None
+    content_type: str | None = None
     error: str | None = None
     action_requests: list[dict[str, Any]] | None = None
     interrupt_ids: list[str] | None = None

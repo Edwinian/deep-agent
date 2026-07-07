@@ -23,6 +23,7 @@ from schemas.invoke_response import (
     StreamMessageKind,
     StreamTextChunk,
 )
+from schemas.content_type import CONTENT_TYPE_KEY
 from utils.hitl import collect_action_requests
 from utils.langfuse_tracing import with_langfuse_config
 
@@ -64,6 +65,21 @@ class StreamService:
         return None
 
     @staticmethod
+    def _tool_message_stream_fields(
+        tool_message: ToolMessage,
+    ) -> tuple[str, str | None]:
+        """Extract client-facing content and optional content type from a ToolMessage."""
+        content = tool_message.content
+        if not isinstance(content, str):
+            content = InvokeService.content_to_text(content)
+        content_type = tool_message.additional_kwargs.get(CONTENT_TYPE_KEY)
+        if content_type is not None:
+            content_type = str(content_type)
+        else:
+            content_type = None
+        return content, content_type
+
+    @staticmethod
     def serialize_tool_output(output: Any) -> Any:
         """Convert a tool output payload to a JSON-serializable value."""
         if output is None:
@@ -73,10 +89,10 @@ class StreamService:
 
         tool_message = StreamService._tool_message_from_output(output)
         if tool_message is not None:
-            content = tool_message.content
-            if isinstance(content, str):
-                return content
-            return InvokeService.content_to_text(content)
+            content, content_type = StreamService._tool_message_stream_fields(tool_message)
+            if content_type is not None:
+                return {"content_type": content_type, "content": content}
+            return content
 
         if isinstance(output, ToolMessage):
             content = output.content
@@ -231,7 +247,7 @@ class StreamService:
             interrupt_ids=self.interrupt_ids_from_payloads(interrupts),
         )
 
-    async def yield_interrupt_chunks(
+    async def _emit_interrupt_chunks(
         self,
         interrupts: list[Any],
         *,
@@ -346,7 +362,7 @@ class StreamService:
         async for item in self.merge_projection_feeds(feeds):
             yield item
 
-    async def yield_values_item(
+    async def yield_interrupt_chunks(
         self,
         item: Any,
         *,
@@ -357,12 +373,12 @@ class StreamService:
         subagent_name: str | None = None,
         subagent_cause: dict[str, Any] | None = None,
     ) -> AsyncIterator[str]:
-        """Map one values-feed item to interrupt chunks when applicable."""
+        """Map one ``run.values`` feed item to interrupt SSE chunks."""
         if isinstance(item, tuple) and len(item) == 2:
             kind, payload = item
             if kind != "interrupt":
                 return
-            async for line in self.yield_interrupt_chunks(
+            async for line in self._emit_interrupt_chunks(
                 [payload],
                 thread_id=thread_id,
                 agent_id=agent_id,
@@ -374,7 +390,7 @@ class StreamService:
                 yield line
             return
 
-        async for line in self.yield_interrupt_chunks(
+        async for line in self._emit_interrupt_chunks(
             self.extract_interrupts(item),
             thread_id=thread_id,
             agent_id=agent_id,
@@ -572,7 +588,7 @@ class StreamService:
                 continue
             delta_interrupts = self.extract_interrupts(delta)
             if delta_interrupts:
-                async for line in self.yield_interrupt_chunks(
+                async for line in self._emit_interrupt_chunks(
                     delta_interrupts,
                     thread_id=thread_id,
                     agent_id=agent_id,
@@ -601,7 +617,7 @@ class StreamService:
             )
 
         raw_output = getattr(tool_call, "output", None)
-        async for line in self.yield_interrupt_chunks(
+        async for line in self._emit_interrupt_chunks(
             self.extract_interrupts(raw_output),
             thread_id=thread_id,
             agent_id=agent_id,
@@ -612,6 +628,12 @@ class StreamService:
         ):
             yield line
 
+        tool_message = self._tool_message_from_output(raw_output)
+        tool_content: str | None = None
+        tool_content_type: str | None = None
+        if tool_message is not None:
+            tool_content, tool_content_type = self._tool_message_stream_fields(tool_message)
+
         yield self.emit_stream_chunk(
             StreamTextChunk(
                 **common,
@@ -619,6 +641,8 @@ class StreamService:
                 tool_call_id=tool_call_id or None,
                 tool_name=tool_name,
                 input=resolved_input,
+                content=tool_content,
+                content_type=tool_content_type,
                 output=self.serialize_tool_output(raw_output),
                 error=getattr(tool_call, "error", None),
             )
@@ -662,7 +686,7 @@ class StreamService:
                 continue
 
             if name == "values":
-                async for line in self.yield_values_item(
+                async for line in self.yield_interrupt_chunks(
                     item,
                     thread_id=thread_id,
                     agent_id=agent_id,
@@ -754,7 +778,7 @@ class StreamService:
                     continue
 
                 if name == "values":
-                    async for line in self.yield_values_item(
+                    async for line in self.yield_interrupt_chunks(
                         item,
                         thread_id=thread_id,
                         agent_id=agent_id,
