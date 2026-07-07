@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, TypeAlias
 
 from langchain.agents.middleware.human_in_the_loop import ActionRequest
 from pydantic import BaseModel, ConfigDict, Field
+from typing_extensions import TypedDict
 
 
 class MessageType(StrEnum):
@@ -148,6 +149,73 @@ class StreamMode(StrEnum):
     VALUES = "values"
 
 
+class SerializedInterruptPayload(TypedDict):
+    """Serialized LangGraph interrupt in a stream values snapshot."""
+
+    value: dict[str, Any]
+    id: str
+
+
+class StreamSerializedMessageDict(TypedDict):
+    """One LangChain message dict produced by ``messages_to_dict``."""
+
+    type: str
+    data: dict[str, Any]
+
+
+class StreamNodePayload(TypedDict, total=False):
+    """Per-node payload for ``stream_mode='updates'`` (e.g. model/tools nodes)."""
+
+    messages: list[StreamSerializedMessageDict]
+
+
+class StreamValuesEvent(TypedDict, total=False):
+    """Full graph state snapshot emitted when ``stream_mode='values'``.
+
+    ``messages`` holds the conversation; the last ``type='ai'`` entry's
+    ``data.content`` is the user-facing agent reply. ``files`` is the virtual
+    filesystem (search results, etc.). ``__interrupt__`` appears when HITL
+    pauses the run.
+    """
+
+    messages: list[StreamSerializedMessageDict]
+    files: dict[str, dict[str, Any]]
+    __interrupt__: list[SerializedInterruptPayload]
+
+
+StreamUpdateEvent: TypeAlias = dict[str, StreamNodePayload | None]
+"""Incremental updates when ``stream_mode='updates'``.
+
+Known keys include ``model`` and ``tools`` (each a :class:`StreamNodePayload`).
+Middleware steps appear as ``{MiddlewareClass}.{hook}`` with value ``null``
+or a nested payload.
+"""
+
+StreamEvent: TypeAlias = StreamValuesEvent | StreamUpdateEvent
+"""``event`` field on a :class:`StreamChunk`."""
+
+StreamSerializedScalar: TypeAlias = str | int | float | bool | None
+StreamSerializableInput: TypeAlias = (
+    StreamSerializedScalar
+    | dict[str, Any]
+    | list[Any]
+    | tuple[Any, ...]
+)
+"""Nested payloads from LangGraph ``astream`` before JSON serialization.
+
+``BaseMessage`` and ``LangGraphInterrupt`` instances are also accepted at
+runtime; they are handled before the structural branches below.
+"""
+
+StreamSerializedValue: TypeAlias = (
+    StreamSerializedScalar
+    | SerializedInterruptPayload
+    | StreamSerializedMessageDict
+    | dict[str, Any]
+    | list[Any]
+)
+
+
 class StreamChunk(BaseModel):
     """One NDJSON line emitted by POST /stream."""
 
@@ -155,4 +223,4 @@ class StreamChunk(BaseModel):
     agent_id: int
     graph: list[str]
     stream_mode: StreamMode
-    event: dict[str, Any]
+    event: StreamValuesEvent | StreamUpdateEvent

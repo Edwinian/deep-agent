@@ -6,7 +6,7 @@ import json
 import os
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 from dotenv import load_dotenv
 
@@ -25,9 +25,14 @@ from schemas.invoke_request import InvokeAgent
 from schemas.invoke_response import (
     InvokeResponse,
     InvokeStatus,
+    SerializedInterruptPayload,
     SerializedMessage,
     StreamChunk,
+    StreamEvent,
     StreamMode,
+    StreamSerializableInput,
+    StreamSerializedMessageDict,
+    StreamSerializedValue,
 )
 from utils.compile_agent import compile_agent
 from utils.get_checkpointer import CheckpointerType, get_checkpointer
@@ -65,23 +70,34 @@ def _get_compiled_agent(agent_id: int, model_config: ModelConfig | None) -> Comp
     return _agent_cache[agent_id]
 
 
-def _serialize_stream_value(value: Any) -> Any:
-    if isinstance(value, LangGraphInterrupt):
-        return {
-            "value": _serialize_stream_value(value.value),
-            "id": value.id,
+def _serialize_stream_value(
+    event: StreamSerializableInput | LangGraphInterrupt | BaseMessage,
+) -> StreamSerializedValue:
+    if isinstance(event, LangGraphInterrupt):
+        interrupt: SerializedInterruptPayload = {
+            "value": _serialize_stream_value(event.value),
+            "id": event.id,
         }
-    if isinstance(value, BaseMessage):
-        return messages_to_dict([value])[0]
-    if isinstance(value, list):
-        if value and isinstance(value[0], BaseMessage):
-            return messages_to_dict(value)
-        return [_serialize_stream_value(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _serialize_stream_value(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_serialize_stream_value(item) for item in value]
-    return value
+        return interrupt
+    if isinstance(event, BaseMessage):
+        message: StreamSerializedMessageDict = messages_to_dict([event])[0]
+        return message
+    if isinstance(event, list):
+        if event and isinstance(event[0], BaseMessage):
+            return messages_to_dict(event)
+        return [_serialize_stream_value(item) for item in event]
+    if isinstance(event, dict):
+        return {key: _serialize_stream_value(item) for key, item in event.items()}
+    if isinstance(event, tuple):
+        return [_serialize_stream_value(item) for item in event]
+    return event
+
+
+def _serialize_stream_event(
+    event: StreamSerializableInput | LangGraphInterrupt | BaseMessage,
+) -> StreamEvent:
+    """Serialize a LangGraph ``astream`` event payload for :class:`StreamChunk`."""
+    return cast(StreamEvent, _serialize_stream_value(event))
 
 
 def _serialize_messages(messages: list[Any]) -> list[SerializedMessage]:
@@ -198,7 +214,7 @@ async def _stream_agent_events(
             agent_id=agent_id,
             graph=list(graph_name),
             stream_mode=StreamMode(stream_mode),
-            event=_serialize_stream_value(event),
+            event=_serialize_stream_event(event),
         )
         yield json.dumps(chunk.model_dump(mode="json"), ensure_ascii=False) + "\n"
 
