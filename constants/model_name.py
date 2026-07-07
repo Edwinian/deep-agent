@@ -15,6 +15,7 @@ class ModelName(StrEnum):
     """Supported model identifiers."""
 
     GROK_3_MINI = "grok-3-mini"
+    GROK_4_3 = "grok-4.3"
     GROK_4_FAST_NON_REASONING = "grok-4-fast-non-reasoning"
 
     def with_provider(self, provider: ModelProvider = ModelProvider.XAI) -> str:

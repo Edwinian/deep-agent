@@ -10,5 +10,5 @@ DEFAULT_INTERRUPT_ON: InterruptOn = {
     summarize_tool.name: False,
     think_tool.name: False,
     read_todos.name: False,
-    web_search_tool.name: False,
+    web_search_tool.name: True,
 }

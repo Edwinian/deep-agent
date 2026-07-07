@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from constants.model_name import ModelName
 from prompts import SUMMARIZE
 
-_DEFAULT_MODEL = ModelName.GROK_3_MINI.with_provider()
+_DEFAULT_MODEL = ModelName.GROK_4_3.with_provider()
 
 
 class Summary(BaseModel):

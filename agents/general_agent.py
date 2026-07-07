@@ -11,7 +11,7 @@ from prompts import (
     TODO_USAGE_INSTRUCTIONS,
 )
 
-DEFAULT_MODEL = ModelName.GROK_3_MINI.with_provider()
+DEFAULT_MODEL = ModelName.GROK_4_3.with_provider()
 MAX_CONCURRENT_RESEARCH_UNITS = 3
 MAX_RESEARCHER_ITERATIONS = 3
 

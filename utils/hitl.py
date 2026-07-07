@@ -125,9 +125,8 @@ def build_resume_command(
 
         resume_payload[interrupt_id] = {"decisions": decisions}
 
-    if len(resume_payload) == 1:
-        return Command(resume=next(iter(resume_payload.values())))
-
+    # Always key resume values by interrupt id. Subgraph interrupts (e.g. research
+    # subagent inside task) may not receive a bare HITLResponse reliably.
     return Command(resume=resume_payload)
 
 
