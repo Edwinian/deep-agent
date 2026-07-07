@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -13,8 +15,18 @@ from invoke_service import InvokeService
 from schemas.invoke_request import InvokeAgent
 from schemas.invoke_response import InvokeResponse
 from stream_service import StreamService
+from utils.get_checkpointer import close_sqlite_checkpointer, init_sqlite_checkpointer
 
-app = FastAPI(title="Deep Agents API")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Initialize persistent SQLite checkpoints for HITL thread continuity."""
+    await init_sqlite_checkpointer()
+    yield
+    await close_sqlite_checkpointer()
+
+
+app = FastAPI(title="Deep Agents API", lifespan=lifespan)
 
 invoke_service = InvokeService()
 stream_service = StreamService(invoke_service)

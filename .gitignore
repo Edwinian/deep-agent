@@ -6,7 +6,11 @@ __pycache__/
 # C extensions
 *.so
 
-ls-academy/
+# Local checkpoint database (created on server start)
+data/checkpoints.db
+data/checkpoints.db-wal
+data/checkpoints.db-shm
+data/checkpoints.db-journal
 
 # Distribution / packaging
 .Python

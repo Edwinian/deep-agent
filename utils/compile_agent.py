@@ -54,6 +54,6 @@ def compile_agent(
         system_prompt=agent["system_prompt"],
         subagents=compiled_subagents,
         model=resolved_model,
-        checkpointer=checkpointer or get_checkpointer(CheckpointerType.IN_MEMORY),
+        checkpointer=checkpointer or get_checkpointer(CheckpointerType.ASYNC_SQLITE),
         interrupt_on=resolved_interrupt_on,
     )

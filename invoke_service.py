@@ -20,7 +20,6 @@ from schemas.invoke_response import (
     SerializedMessage,
 )
 from utils.compile_agent import compile_agent
-from utils.get_checkpointer import CheckpointerType, get_checkpointer
 from utils.hitl import (
     build_resume_command,
     collect_action_requests,
@@ -31,8 +30,7 @@ from utils.langfuse_tracing import with_langfuse_config
 
 _INTERRUPT_NOT_FOUND_DETAIL = (
     "No interrupted tool calls found for this thread. "
-    "The server may have restarted (in-memory checkpoints are cleared on reload) "
-    "or the thread_id is wrong."
+    "The thread_id may be wrong or the checkpoint database was reset."
 )
 
 
@@ -40,8 +38,14 @@ class InvokeService:
     """Compile agents, run turns, and build invoke responses."""
 
     def __init__(self, checkpointer: Checkpointer | None = None) -> None:
-        self._checkpointer = checkpointer or get_checkpointer(CheckpointerType.IN_MEMORY)
+        self._checkpointer = checkpointer
         self._agent_cache: dict[int, CompiledStateGraph] = {}
+
+    def _compile_kwargs(self) -> dict[str, Checkpointer]:
+        """Pass an explicit checkpointer override when one was injected."""
+        if self._checkpointer is None:
+            return {}
+        return {"checkpointer": self._checkpointer}
 
     def get_compiled_agent(
         self,
@@ -57,13 +61,13 @@ class InvokeService:
             return compile_agent(
                 agent_spec,
                 model_config=model_config,
-                checkpointer=self._checkpointer,
+                **self._compile_kwargs(),
             )
 
         if agent_id not in self._agent_cache:
             self._agent_cache[agent_id] = compile_agent(
                 agent_spec,
-                checkpointer=self._checkpointer,
+                **self._compile_kwargs(),
             )
         return self._agent_cache[agent_id]
 

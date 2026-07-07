@@ -10,10 +10,18 @@ from utils.display import (
     stream_agent,
 )
 from utils.generate_agent_id import generate_agent_id
-from utils.get_checkpointer import CheckpointerType, get_checkpointer
+from utils.get_checkpointer import (
+    CheckpointerType,
+    SQLITE_CONN_STRING,
+    close_sqlite_checkpointer,
+    get_checkpointer,
+    init_sqlite_checkpointer,
+)
 
 __all__ = [
     "CheckpointerType",
+    "SQLITE_CONN_STRING",
+    "close_sqlite_checkpointer",
     "compile_agent",
     "compile_subagents",
     "format_message",
@@ -21,6 +29,7 @@ __all__ = [
     "format_messages",
     "generate_agent_id",
     "get_checkpointer",
+    "init_sqlite_checkpointer",
     "show_prompt",
     "stream_agent",
 ]
