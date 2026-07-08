@@ -7,7 +7,7 @@ import sys
 
 import httpx
 
-from agents.general_agent import GENERAL_AGENT_ID
+from agents.ids import GENERAL_AGENT_ID
 from schemas.invoke_request import DecisionType, Permission
 
 DEFAULT_THREAD_ID = "915491e2-2060-41da-8e3e-6e1e629993ec"

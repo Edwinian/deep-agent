@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from agents.general_agent import GENERAL_AGENT_ID
+from agents.ids import GENERAL_AGENT_ID
 from schemas.invoke_request import DecisionType, Permission
 from stream import (
     _print_chunk_summary,

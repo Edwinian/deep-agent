@@ -15,12 +15,14 @@ from invoke_service import InvokeService
 from schemas.invoke_request import InvokeAgent
 from schemas.invoke_response import InvokeResponse
 from stream_service import StreamService
+from db.agent_store import init_agent_db
 from utils.get_checkpointer import close_sqlite_checkpointer, init_sqlite_checkpointer
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Initialize persistent SQLite checkpoints for HITL thread continuity."""
+    init_agent_db()
     await init_sqlite_checkpointer()
     yield
     await close_sqlite_checkpointer()

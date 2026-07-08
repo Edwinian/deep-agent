@@ -11,10 +11,8 @@ from langchain_core.runnables.config import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Checkpointer
 
-from agents.agent_registry import AGENT_REGISTRY
-from agents.general_agent import GENERAL_AGENT_ID, resolve_general_agent
-from agents.research_agent import RESEARCH_AGENT_ID, resolve_research_agent
 from agents.types import DeepAgent, ModelConfig
+from db.agent_store import AgentNotFoundError
 from schemas.invoke_request import InvokeAgent
 from schemas.invoke_response import (
     InvokeResponse,
@@ -29,6 +27,7 @@ from utils.hitl import (
     is_resume_request,
 )
 from utils.langfuse_tracing import with_langfuse_config
+from utils.resolve_agent import resolve_agent
 
 _INTERRUPT_NOT_FOUND_DETAIL = (
     "No interrupted tool calls found for this thread. "
@@ -50,16 +49,11 @@ class InvokeService:
         return {"checkpointer": self._checkpointer}
 
     async def _resolve_agent_spec(self, agent_id: int) -> DeepAgent:
-        """Load the agent spec, resolving dynamic tools when needed."""
-        if agent_id == GENERAL_AGENT_ID:
-            return await resolve_general_agent()
-        if agent_id == RESEARCH_AGENT_ID:
-            return await resolve_research_agent()
-
-        agent_spec = AGENT_REGISTRY.get(agent_id)
-        if agent_spec is None:
-            raise HTTPException(status_code=404, detail=f"Unknown agent_id: {agent_id}")
-        return agent_spec
+        """Load the agent spec from the database."""
+        try:
+            return await resolve_agent(agent_id)
+        except AgentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     async def get_compiled_agent(
         self,
