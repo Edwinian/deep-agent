@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 
 from invoke_service import InvokeService
@@ -44,6 +44,18 @@ async def invoke(payload: InvokeAgent) -> InvokeResponse:
 async def stream(payload: InvokeAgent) -> StreamingResponse:
     """Compile the requested agent and stream v3 projections over SSE."""
     return await stream_service.stream(payload)
+
+
+@app.post("/cancel-stream/{thread_id}")
+async def cancel_stream(thread_id: str) -> dict[str, bool | str]:
+    """Abort an in-flight /stream run for this thread_id."""
+    cancelled = await stream_service.cancel_stream(thread_id)
+    if not cancelled:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No active stream found for thread_id {thread_id!r}",
+        )
+    return {"thread_id": thread_id, "cancelled": True}
 
 
 if __name__ == "__main__":

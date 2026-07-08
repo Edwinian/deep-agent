@@ -130,6 +130,7 @@ class InvokeStatus(StrEnum):
 
     COMPLETED = "completed"
     AWAITING_TOOL_PERMISSION = "awaiting_tool_permission"
+    CANCELLED = "cancelled"
 
 
 class InvokeResponse(BaseModel):

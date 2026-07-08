@@ -35,6 +35,25 @@ class StreamService:
 
     def __init__(self, invoke_service: InvokeService) -> None:
         self._invoke_service = invoke_service
+        self._runs_lock = asyncio.Lock()
+        self._active_runs: dict[str, AsyncGraphRunStream] = {}
+        self._cancel_requested: set[str] = set()
+
+    async def cancel_stream(self, thread_id: str) -> bool:
+        """Abort an in-flight /stream run (best effort) by `thread_id`."""
+        async with self._runs_lock:
+            run = self._active_runs.get(thread_id)
+            if run is None:
+                return False
+            self._cancel_requested.add(thread_id)
+
+        # Abort outside the lock so other tasks can observe state updates.
+        try:
+            await run.abort()
+        except Exception:
+            # If abort fails mid-flight, we still treat it as a cancellation request.
+            pass
+        return True
 
     @staticmethod
     def emit_stream_chunk(chunk: StreamTextChunk) -> str:
@@ -522,8 +541,20 @@ class StreamService:
         thread_id: str,
         agent_id: int,
         raw_result: dict[str, Any],
+        cancelled: bool = False,
     ) -> str:
         """Emit one terminal chunk matching invoke's final reply and status."""
+        if cancelled:
+            return self.emit_stream_chunk(
+                StreamTextChunk(
+                    thread_id=thread_id,
+                    agent_id=agent_id,
+                    kind=StreamMessageKind.RUN_FINISHED,
+                    status=InvokeStatus.CANCELLED,
+                    reply=InvokeService.last_ai_reply(raw_result.get("messages", [])),
+                )
+            )
+
         if self._invoke_service.has_pending_interrupts(raw_result):
             return self.emit_stream_chunk(
                 StreamTextChunk(
@@ -763,61 +794,76 @@ class StreamService:
 
         seen_interrupt_ids: set[str] = set()
 
-        async with run:
-            async for name, item in self.merge_run_projections(
-                run,
-                seen_interrupt_ids=seen_interrupt_ids,
-            ):
-                if name == "messages":
-                    async for line in self.yield_message_chunks(
-                        item,
-                        thread_id=thread_id,
-                        agent_id=agent_id,
-                    ):
-                        yield line
-                    continue
+        async with self._runs_lock:
+            self._active_runs[thread_id] = run
 
-                if name == "values":
-                    async for line in self.yield_interrupt_chunks(
-                        item,
-                        thread_id=thread_id,
-                        agent_id=agent_id,
-                        seen_interrupt_ids=seen_interrupt_ids,
-                    ):
-                        yield line
-                    continue
+        try:
+            async with run:
+                async for name, item in self.merge_run_projections(
+                    run,
+                    seen_interrupt_ids=seen_interrupt_ids,
+                ):
+                    if name == "messages":
+                        async for line in self.yield_message_chunks(
+                            item,
+                            thread_id=thread_id,
+                            agent_id=agent_id,
+                        ):
+                            yield line
+                        continue
 
-                if name == "tool_calls":
-                    async for line in self.yield_run_tool_call_chunks(
-                        item,
-                        thread_id=thread_id,
-                        agent_id=agent_id,
-                        seen_interrupt_ids=seen_interrupt_ids,
-                    ):
-                        yield line
-                    continue
+                    if name == "values":
+                        async for line in self.yield_interrupt_chunks(
+                            item,
+                            thread_id=thread_id,
+                            agent_id=agent_id,
+                            seen_interrupt_ids=seen_interrupt_ids,
+                        ):
+                            yield line
+                        continue
 
-                if name == "subagents":
-                    async for line in self.yield_subagent_chunks(
-                        item,
-                        thread_id=thread_id,
-                        agent_id=agent_id,
-                        seen_interrupt_ids=seen_interrupt_ids,
-                    ):
-                        yield line
+                    if name == "tool_calls":
+                        async for line in self.yield_run_tool_call_chunks(
+                            item,
+                            thread_id=thread_id,
+                            agent_id=agent_id,
+                            seen_interrupt_ids=seen_interrupt_ids,
+                        ):
+                            yield line
+                        continue
 
-            final_state = await run.output()
-            if isinstance(final_state, dict):
-                raw_result = dict(final_state)
-                if await run.interrupted():
+                    if name == "subagents":
+                        async for line in self.yield_subagent_chunks(
+                            item,
+                            thread_id=thread_id,
+                            agent_id=agent_id,
+                            seen_interrupt_ids=seen_interrupt_ids,
+                        ):
+                            yield line
+
+                final_state = await run.output()
+                raw_result: dict[str, Any] = (
+                    dict(final_state) if isinstance(final_state, dict) else {}
+                )
+                if isinstance(final_state, dict) and await run.interrupted():
                     run_interrupts = await run.interrupts()
                     if run_interrupts and not raw_result.get("__interrupt__"):
                         raw_result["__interrupt__"] = run_interrupts
+
+                async with self._runs_lock:
+                    cancelled = thread_id in self._cancel_requested
+                    self._cancel_requested.discard(thread_id)
+
                 yield await self.yield_run_finished_chunk(
                     thread_id=thread_id,
                     agent_id=agent_id,
                     raw_result=raw_result,
+                    cancelled=cancelled,
                 )
+        finally:
+            async with self._runs_lock:
+                self._active_runs.pop(thread_id, None)
+                self._cancel_requested.discard(thread_id)
 
     async def stream(self, payload: InvokeAgent) -> StreamingResponse:
         """Compile the requested agent and stream v3 message and tool-call projections."""
