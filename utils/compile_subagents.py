@@ -53,13 +53,7 @@ def _compile_subagent(
     )
     return CompiledSubAgent(
         name=agent["name"],
-        description=json.dumps(
-            {
-                "description": agent["description"],
-                "system_prompt": agent["system_prompt"],
-            },
-            ensure_ascii=False,
-        ),
+        description=agent["description"],
         runnable=runnable,
     )
 

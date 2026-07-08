@@ -11,7 +11,7 @@ import httpx
 from agents.general_agent import GENERAL_AGENT_ID
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
-DEFAULT_MESSAGE = "What are the latest developments in LangGraph?"
+DEFAULT_MESSAGE = "How is weather in Hong Kong?"
 
 
 def invoke_agent(

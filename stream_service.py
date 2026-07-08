@@ -823,7 +823,7 @@ class StreamService:
         """Compile the requested agent and stream v3 message and tool-call projections."""
         model_config = payload.get("model_config")
         agent_id = payload["agent_id"]
-        agent = self._invoke_service.get_compiled_agent(agent_id, model_config)
+        agent = await self._invoke_service.get_compiled_agent(agent_id, model_config)
         thread_id = payload.get("thread_id") or str(uuid.uuid4())
         config: RunnableConfig = with_langfuse_config(
             {"configurable": {"thread_id": thread_id}},

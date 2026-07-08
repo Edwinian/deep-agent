@@ -1,6 +1,8 @@
 """General orchestrator agent spec."""
 
+import sys
 from datetime import datetime
+from pathlib import Path
 
 from agents.research_agent import RESEARCH_AGENT
 from agents.types import DeepAgent
@@ -10,6 +12,12 @@ from prompts import (
     SUBAGENT_USAGE_INSTRUCTIONS,
     TODO_USAGE_INSTRUCTIONS,
 )
+
+_MCP_DIR = Path(__file__).resolve().parent.parent / "mcp"
+if str(_MCP_DIR) not in sys.path:
+    sys.path.insert(0, str(_MCP_DIR))
+
+from get_mcp_tools import get_mcp_tools
 
 DEFAULT_MODEL = ModelName.GROK_4_3.with_provider()
 MAX_CONCURRENT_RESEARCH_UNITS = 3
@@ -55,3 +63,9 @@ GENERAL_AGENT: DeepAgent = {
     "model": DEFAULT_MODEL,
     "tools": [],
 }
+
+
+async def resolve_general_agent() -> DeepAgent:
+    """Return the general agent spec with MCP tools loaded."""
+    mcp_tools = await get_mcp_tools()
+    return {**GENERAL_AGENT, "tools": mcp_tools}

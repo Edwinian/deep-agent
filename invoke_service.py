@@ -12,7 +12,8 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Checkpointer
 
 from agents.agent_registry import AGENT_REGISTRY
-from agents.types import ModelConfig
+from agents.general_agent import GENERAL_AGENT_ID, resolve_general_agent
+from agents.types import DeepAgent, ModelConfig
 from schemas.invoke_request import InvokeAgent
 from schemas.invoke_response import (
     InvokeResponse,
@@ -47,17 +48,24 @@ class InvokeService:
             return {}
         return {"checkpointer": self._checkpointer}
 
-    def get_compiled_agent(
+    async def _resolve_agent_spec(self, agent_id: int) -> DeepAgent:
+        """Load the agent spec, resolving dynamic tools when needed."""
+        if agent_id == GENERAL_AGENT_ID:
+            return await resolve_general_agent()
+
+        agent_spec = AGENT_REGISTRY.get(agent_id)
+        if agent_spec is None:
+            raise HTTPException(status_code=404, detail=f"Unknown agent_id: {agent_id}")
+        return agent_spec
+
+    async def get_compiled_agent(
         self,
         agent_id: int,
         model_config: ModelConfig | None,
     ) -> CompiledStateGraph:
         """Return a cached compiled agent graph, compiling on first use per agent_id."""
-        agent_spec = AGENT_REGISTRY.get(agent_id)
-        if agent_spec is None:
-            raise HTTPException(status_code=404, detail=f"Unknown agent_id: {agent_id}")
-
         if model_config is not None:
+            agent_spec = await self._resolve_agent_spec(agent_id)
             return compile_agent(
                 agent_spec,
                 model_config=model_config,
@@ -65,6 +73,7 @@ class InvokeService:
             )
 
         if agent_id not in self._agent_cache:
+            agent_spec = await self._resolve_agent_spec(agent_id)
             self._agent_cache[agent_id] = compile_agent(
                 agent_spec,
                 **self._compile_kwargs(),
@@ -127,6 +136,18 @@ class InvokeService:
         return ""
 
     @staticmethod
+    def _normalize_message_dict(message: dict[str, Any]) -> dict[str, Any]:
+        """Coerce message content to a string for API serialization."""
+        data = message.get("data")
+        if not isinstance(data, dict):
+            return message
+
+        content = data.get("content")
+        if not isinstance(content, str):
+            data["content"] = InvokeService.content_to_text(content)
+        return message
+
+    @staticmethod
     def serialize_messages(messages: list[Any]) -> list[SerializedMessage]:
         """Serialize LangChain messages for the client-facing invoke response."""
         if not messages:
@@ -135,7 +156,12 @@ class InvokeService:
             message_dicts = messages_to_dict(messages)
         else:
             message_dicts = messages
-        return [SerializedMessage.model_validate(message) for message in message_dicts]
+        return [
+            SerializedMessage.model_validate(
+                InvokeService._normalize_message_dict(message)
+            )
+            for message in message_dicts
+        ]
 
     @staticmethod
     def has_pending_interrupts(result: dict[str, Any]) -> bool:
@@ -232,7 +258,7 @@ class InvokeService:
         """Compile the requested agent and run or resume one turn."""
         model_config = payload.get("model_config")
         agent_id = payload["agent_id"]
-        agent = self.get_compiled_agent(agent_id, model_config)
+        agent = await self.get_compiled_agent(agent_id, model_config)
         thread_id = payload.get("thread_id") or str(uuid.uuid4())
         config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
 

@@ -11,4 +11,7 @@ DEFAULT_INTERRUPT_ON: InterruptOn = {
     think_tool.name: False,
     read_todos.name: False,
     web_search_tool.name: True,
+    "get_weather": False,
+    "add": False,
+    "multiply": False,
 }
