@@ -17,7 +17,8 @@ _MCP_DIR = Path(__file__).resolve().parent.parent / "mcp"
 if str(_MCP_DIR) not in sys.path:
     sys.path.insert(0, str(_MCP_DIR))
 
-from get_mcp_tools import get_mcp_tools
+from get_math_mcp_tools import get_math_mcp_tools
+from get_weather_mcp_tools import get_weather_mcp_tools
 
 DEFAULT_MODEL = ModelName.GROK_4_3.with_provider()
 MAX_CONCURRENT_RESEARCH_UNITS = 3
@@ -67,5 +68,6 @@ GENERAL_AGENT: DeepAgent = {
 
 async def resolve_general_agent() -> DeepAgent:
     """Return the general agent spec with MCP tools loaded."""
-    mcp_tools = await get_mcp_tools()
-    return {**GENERAL_AGENT, "tools": mcp_tools}
+    weather_tools = await get_weather_mcp_tools()
+    math_tools = await get_math_mcp_tools()
+    return {**GENERAL_AGENT, "tools": [*weather_tools, *math_tools]}
