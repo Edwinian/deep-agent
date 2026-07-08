@@ -7,6 +7,8 @@ from langgraph.prebuilt import InjectedState
 
 from state import DeepAgentState
 
+READ_TODOS_TOOL_ID = 2004
+
 
 @tool(parse_docstring=True)
 def read_todos(

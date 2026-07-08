@@ -45,7 +45,7 @@ trap cleanup EXIT INT TERM
 
 free_port "$WEATHER_PORT"
 
-"$PYTHON" mcp/weather_server.py &
+"$PYTHON" mcp_servers/weather_server.py &
 WEATHER_PID=$!
 
 for _ in {1..30}; do

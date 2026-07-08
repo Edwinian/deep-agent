@@ -8,8 +8,10 @@ from pathlib import Path
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
-_MCP_DIR = Path(__file__).parent
-_MATH_SERVER = _MCP_DIR / "math_server.py"
+_MCP_SERVERS_DIR = Path(__file__).resolve().parent.parent / "mcp_servers"
+_MATH_SERVER = _MCP_SERVERS_DIR / "math_server.py"
+
+MATH_MCP_TOOLS_ID = 2002
 
 
 async def get_math_mcp_tools(token: str | None = None) -> list[BaseTool]:

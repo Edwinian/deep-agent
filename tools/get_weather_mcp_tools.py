@@ -7,6 +7,7 @@ import os
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
+WEATHER_MCP_TOOLS_ID = 2001
 WEATHER_MCP_URL = os.getenv("WEATHER_MCP_URL", "http://127.0.0.1:8001/mcp")
 
 

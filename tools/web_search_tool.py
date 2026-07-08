@@ -32,6 +32,8 @@ from tools.summarize_tool import Summary, summarize_content
 
 logger = logging.getLogger(__name__)
 
+WEB_SEARCH_TOOL_ID = 2006
+
 
 def _text_tool_message(
     content: str,

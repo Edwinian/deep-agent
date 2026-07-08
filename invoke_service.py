@@ -13,6 +13,7 @@ from langgraph.types import Checkpointer
 
 from agents.agent_registry import AGENT_REGISTRY
 from agents.general_agent import GENERAL_AGENT_ID, resolve_general_agent
+from agents.research_agent import RESEARCH_AGENT_ID, resolve_research_agent
 from agents.types import DeepAgent, ModelConfig
 from schemas.invoke_request import InvokeAgent
 from schemas.invoke_response import (
@@ -52,6 +53,8 @@ class InvokeService:
         """Load the agent spec, resolving dynamic tools when needed."""
         if agent_id == GENERAL_AGENT_ID:
             return await resolve_general_agent()
+        if agent_id == RESEARCH_AGENT_ID:
+            return await resolve_research_agent()
 
         agent_spec = AGENT_REGISTRY.get(agent_id)
         if agent_spec is None:

@@ -11,6 +11,8 @@ from prompts import SUMMARIZE
 
 _DEFAULT_MODEL = ModelName.GROK_4_3.with_provider()
 
+SUMMARIZE_TOOL_ID = 2005
+
 
 class Summary(BaseModel):
     """Structured summary with filename and brief text."""

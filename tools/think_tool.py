@@ -2,6 +2,8 @@
 
 from langchain_core.tools import tool
 
+THINK_TOOL_ID = 2003
+
 
 @tool(parse_docstring=True)
 def think_tool(reflection: str) -> str:

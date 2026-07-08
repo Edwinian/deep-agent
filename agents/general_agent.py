@@ -1,10 +1,8 @@
 """General orchestrator agent spec."""
 
-import sys
 from datetime import datetime
-from pathlib import Path
 
-from agents.research_agent import RESEARCH_AGENT
+from agents.research_agent import RESEARCH_AGENT, resolve_research_agent
 from agents.types import DeepAgent
 from constants.model_name import ModelName
 from prompts import (
@@ -12,19 +10,15 @@ from prompts import (
     SUBAGENT_USAGE_INSTRUCTIONS,
     TODO_USAGE_INSTRUCTIONS,
 )
-
-_MCP_DIR = Path(__file__).resolve().parent.parent / "mcp"
-if str(_MCP_DIR) not in sys.path:
-    sys.path.insert(0, str(_MCP_DIR))
-
-from get_math_mcp_tools import get_math_mcp_tools
-from get_weather_mcp_tools import get_weather_mcp_tools
+from tools.get_math_mcp_tools import MATH_MCP_TOOLS_ID
+from tools.get_weather_mcp_tools import WEATHER_MCP_TOOLS_ID
 
 DEFAULT_MODEL = ModelName.GROK_4_3.with_provider()
 MAX_CONCURRENT_RESEARCH_UNITS = 3
 MAX_RESEARCHER_ITERATIONS = 3
 
 GENERAL_AGENT_ID = 1002
+GENERAL_AGENT_TOOL_IDS = [WEATHER_MCP_TOOLS_ID, MATH_MCP_TOOLS_ID]
 
 
 def _build_subagent_instructions() -> str:
@@ -68,6 +62,8 @@ GENERAL_AGENT: DeepAgent = {
 
 async def resolve_general_agent() -> DeepAgent:
     """Return the general agent spec with MCP tools loaded."""
-    weather_tools = await get_weather_mcp_tools()
-    math_tools = await get_math_mcp_tools()
-    return {**GENERAL_AGENT, "tools": [*weather_tools, *math_tools]}
+    from tools.tool_registry import resolve_tools
+
+    tools = await resolve_tools(GENERAL_AGENT_TOOL_IDS)
+    research_agent = await resolve_research_agent()
+    return {**GENERAL_AGENT, "tools": tools, "subagents": [research_agent]}
