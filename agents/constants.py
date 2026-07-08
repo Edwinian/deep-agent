@@ -6,7 +6,6 @@ from enum import Enum
 class DeepAgentField(str, Enum):
     """Fields defined on :class:`~agents.types.DeepAgent` only."""
 
-    ID = "id"
     SUBAGENTS = "subagents"
     MODEL_CONFIG = "model_config"
 

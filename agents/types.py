@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Required
+from typing import Any, Literal
 
 from langchain.agents.middleware import InterruptOnConfig
 from deepagents.middleware.subagents import CompiledSubAgent, SubAgent
@@ -35,8 +35,6 @@ class DeepAgent(SubAgent, total=False):
     Extends :class:`SubAgent` with :class:`DeepAgentField` members.
     """
 
-    id: Required[int]
-    """Agent registry id (:attr:`DeepAgentField.ID`)."""
     subagents: NotRequired[list[DeepAgent | CompiledSubAgent] | None]
     """Optional nested agents for delegation (:attr:`DeepAgentField.SUBAGENTS`)."""
     model_config: NotRequired[ModelConfig | None]

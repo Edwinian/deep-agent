@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 
 from agents.ids import GENERAL_AGENT_ID, RESEARCH_AGENT_ID
 from constants.model_name import ModelName
@@ -53,20 +53,28 @@ def seed_default_agents(conn: sqlite3.Connection) -> None:
     """Insert default research and general agent configuration."""
     research_prompt = RESEARCHER_INSTRUCTIONS
     general_prompt = _build_general_system_prompt()
+    now = datetime.now(timezone.utc).isoformat()
 
     conn.executemany(
-        "INSERT INTO SystemPrompt (id, content) VALUES (?, ?)",
+        "INSERT INTO SystemPrompt (id, content, created_at) VALUES (?, ?, ?)",
         [
-            (RESEARCH_SYSTEM_PROMPT_ID, research_prompt),
-            (GENERAL_SYSTEM_PROMPT_ID, general_prompt),
+            (RESEARCH_SYSTEM_PROMPT_ID, research_prompt, now),
+            (GENERAL_SYSTEM_PROMPT_ID, general_prompt, now),
         ],
     )
 
     conn.executemany(
         """
         INSERT INTO Agent (
-            id, name, description, system_prompt_id, subagent_ids, model, tool_ids
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            id,
+            name,
+            description,
+            system_prompt_id,
+            subagent_ids,
+            model,
+            tool_ids,
+            created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -80,6 +88,7 @@ def seed_default_agents(conn: sqlite3.Connection) -> None:
                 None,
                 DEFAULT_MODEL,
                 json.dumps([WEB_SEARCH_TOOL_ID, THINK_TOOL_ID]),
+                now,
             ),
             (
                 GENERAL_AGENT_ID,
@@ -92,6 +101,7 @@ def seed_default_agents(conn: sqlite3.Connection) -> None:
                 json.dumps([RESEARCH_AGENT_ID]),
                 DEFAULT_MODEL,
                 json.dumps([WEATHER_MCP_TOOLS_ID, MATH_MCP_TOOLS_ID]),
+                now,
             ),
         ],
     )

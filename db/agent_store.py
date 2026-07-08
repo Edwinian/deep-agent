@@ -20,13 +20,20 @@ class AgentNotFoundError(LookupError):
 
 
 @dataclass(frozen=True)
-class SystemPromptRow:
+class BaseRow:
+    created_at: str
+    updated_at: str | None
+    deleted_at: str | None
+
+
+@dataclass(frozen=True)
+class SystemPromptRow(BaseRow):
     id: int
     content: str
 
 
 @dataclass(frozen=True)
-class AgentRow:
+class AgentRow(BaseRow):
     id: int
     name: str
     description: str
@@ -67,8 +74,21 @@ def _parse_optional_id_list(
     return _parse_id_list(raw, field_name=field_name)
 
 
+def _base_row_fields(row: sqlite3.Row) -> dict[str, str | None]:
+    return {
+        "created_at": str(row["created_at"]),
+        "updated_at": (
+            str(row["updated_at"]) if row["updated_at"] is not None else None
+        ),
+        "deleted_at": (
+            str(row["deleted_at"]) if row["deleted_at"] is not None else None
+        ),
+    }
+
+
 def _row_to_agent(row: sqlite3.Row) -> AgentRow:
     return AgentRow(
+        **_base_row_fields(row),
         id=int(row["id"]),
         name=str(row["name"]),
         description=str(row["description"]),
@@ -82,9 +102,13 @@ def _row_to_agent(row: sqlite3.Row) -> AgentRow:
     )
 
 
-def _agent_table_columns(conn: sqlite3.Connection) -> set[str]:
-    rows = conn.execute("PRAGMA table_info(Agent)").fetchall()
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
     return {str(row["name"]) for row in rows}
+
+
+def _agent_table_columns(conn: sqlite3.Connection) -> set[str]:
+    return _table_columns(conn, "Agent")
 
 
 def _column_is_not_null(conn: sqlite3.Connection, column_name: str) -> bool:
@@ -93,6 +117,22 @@ def _column_is_not_null(conn: sqlite3.Connection, column_name: str) -> bool:
         if str(row["name"]) == column_name:
             return bool(row["notnull"])
     return False
+
+
+def _migrate_timestamp_columns(conn: sqlite3.Connection) -> None:
+    """Add created_at, updated_at, and deleted_at to existing tables."""
+    for table in ("SystemPrompt", "Agent"):
+        columns = _table_columns(conn, table)
+        if "created_at" not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN created_at TEXT")
+            conn.execute(
+                f"UPDATE {table} SET created_at = datetime('now') "
+                "WHERE created_at IS NULL"
+            )
+        if "updated_at" not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN updated_at TEXT")
+        if "deleted_at" not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN deleted_at TEXT")
 
 
 def _migrate_agent_table(conn: sqlite3.Connection) -> None:
@@ -108,11 +148,23 @@ def _migrate_agent_table(conn: sqlite3.Connection) -> None:
                 system_prompt_id INTEGER NOT NULL REFERENCES SystemPrompt(id),
                 subagent_ids TEXT,
                 model TEXT,
-                tool_ids TEXT
+                tool_ids TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT,
+                deleted_at TEXT
             );
 
             INSERT INTO Agent_new (
-                id, name, description, system_prompt_id, subagent_ids, model, tool_ids
+                id,
+                name,
+                description,
+                system_prompt_id,
+                subagent_ids,
+                model,
+                tool_ids,
+                created_at,
+                updated_at,
+                deleted_at
             )
             SELECT
                 id,
@@ -124,7 +176,10 @@ def _migrate_agent_table(conn: sqlite3.Connection) -> None:
                     ELSE json_array(subagent_id)
                 END,
                 model,
-                tool_ids
+                tool_ids,
+                COALESCE(created_at, datetime('now')),
+                updated_at,
+                deleted_at
             FROM Agent;
 
             DROP TABLE Agent;
@@ -151,11 +206,23 @@ def _migrate_agent_table(conn: sqlite3.Connection) -> None:
             system_prompt_id INTEGER NOT NULL REFERENCES SystemPrompt(id),
             subagent_ids TEXT,
             model TEXT,
-            tool_ids TEXT
+            tool_ids TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT,
+            deleted_at TEXT
         );
 
         INSERT INTO Agent_new (
-            id, name, description, system_prompt_id, subagent_ids, model, tool_ids
+            id,
+            name,
+            description,
+            system_prompt_id,
+            subagent_ids,
+            model,
+            tool_ids,
+            created_at,
+            updated_at,
+            deleted_at
         )
         SELECT
             id,
@@ -164,7 +231,10 @@ def _migrate_agent_table(conn: sqlite3.Connection) -> None:
             system_prompt_id,
             NULLIF(subagent_ids, '[]'),
             model,
-            NULLIF(tool_ids, '[]')
+            NULLIF(tool_ids, '[]'),
+            COALESCE(created_at, datetime('now')),
+            updated_at,
+            deleted_at
         FROM Agent;
 
         DROP TABLE Agent;
@@ -181,7 +251,10 @@ def init_agent_db(conn_string: str | None = None) -> None:
             """
             CREATE TABLE IF NOT EXISTS SystemPrompt (
                 id INTEGER PRIMARY KEY,
-                content TEXT NOT NULL
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT,
+                deleted_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS Agent (
@@ -191,11 +264,15 @@ def init_agent_db(conn_string: str | None = None) -> None:
                 system_prompt_id INTEGER NOT NULL REFERENCES SystemPrompt(id),
                 subagent_ids TEXT,
                 model TEXT,
-                tool_ids TEXT
+                tool_ids TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT,
+                deleted_at TEXT
             );
             """
         )
         conn.commit()
+        _migrate_timestamp_columns(conn)
         _migrate_agent_table(conn)
         conn.commit()
 
@@ -218,12 +295,20 @@ def get_system_prompt(
     conn = _connect(conn_string)
     try:
         row = conn.execute(
-            "SELECT id, content FROM SystemPrompt WHERE id = ?",
+            """
+            SELECT id, content, created_at, updated_at, deleted_at
+            FROM SystemPrompt
+            WHERE id = ?
+            """,
             (prompt_id,),
         ).fetchone()
         if row is None:
             raise AgentNotFoundError(f"Unknown system_prompt_id: {prompt_id}")
-        return SystemPromptRow(id=int(row["id"]), content=str(row["content"]))
+        return SystemPromptRow(
+            **_base_row_fields(row),
+            id=int(row["id"]),
+            content=str(row["content"]),
+        )
     finally:
         conn.close()
 
@@ -238,7 +323,17 @@ def get_agent(
     try:
         row = conn.execute(
             """
-            SELECT id, name, description, system_prompt_id, subagent_ids, model, tool_ids
+            SELECT
+                id,
+                name,
+                description,
+                system_prompt_id,
+                subagent_ids,
+                model,
+                tool_ids,
+                created_at,
+                updated_at,
+                deleted_at
             FROM Agent
             WHERE id = ?
             """,

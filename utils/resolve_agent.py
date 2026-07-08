@@ -30,7 +30,6 @@ async def resolve_agent(
     tools = await resolve_tools(row.tool_ids) if row.tool_ids else []
 
     spec: DeepAgent = {
-        "id": row.id,
         "name": row.name,
         "description": row.description,
         "system_prompt": _format_system_prompt(prompt.content),
