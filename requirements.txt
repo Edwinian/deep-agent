@@ -21,3 +21,4 @@ langfuse
 langchain-daytona
 fastmcp
 langchain-mcp-adapters
+toolbox-langchain

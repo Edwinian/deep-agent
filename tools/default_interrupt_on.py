@@ -14,4 +14,6 @@ DEFAULT_INTERRUPT_ON: InterruptOn = {
     "get_weather": False,
     "add": False,
     "multiply": False,
+    "search-hotels-by-location": False,
+    "book-hotel": True,
 }

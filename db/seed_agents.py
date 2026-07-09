@@ -16,6 +16,7 @@ from prompts import (
 )
 from tools.get_math_mcp_tools import MATH_MCP_TOOLS_ID
 from tools.get_weather_mcp_tools import WEATHER_MCP_TOOLS_ID
+from tools.hotel_tools import HOTEL_TOOLS_ID
 from tools.think_tool import THINK_TOOL_ID
 from tools.web_search_tool import WEB_SEARCH_TOOL_ID
 
@@ -100,7 +101,7 @@ def seed_default_agents(conn: sqlite3.Connection) -> None:
                 GENERAL_SYSTEM_PROMPT_ID,
                 json.dumps([RESEARCH_AGENT_ID]),
                 DEFAULT_MODEL,
-                json.dumps([WEATHER_MCP_TOOLS_ID, MATH_MCP_TOOLS_ID]),
+                json.dumps([WEATHER_MCP_TOOLS_ID, MATH_MCP_TOOLS_ID, HOTEL_TOOLS_ID]),
                 now,
             ),
         ],

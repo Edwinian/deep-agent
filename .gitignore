@@ -12,6 +12,7 @@ data/checkpoints.db-wal
 data/checkpoints.db-shm
 data/checkpoints.db-journal
 data/agents.db
+data/toolbox_hotels.db
 
 # Distribution / packaging
 .Python

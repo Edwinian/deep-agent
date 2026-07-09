@@ -11,7 +11,9 @@ import httpx
 from agents.ids import GENERAL_AGENT_ID
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
-DEFAULT_MESSAGE = "My email is 123@hotmail.com, what is my email address?"
+DEFAULT_MESSAGE = (
+    "Search hotels for me from database. "
+)
 
 
 def invoke_agent(

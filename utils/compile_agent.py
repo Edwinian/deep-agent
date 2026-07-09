@@ -184,7 +184,7 @@ def get_sandbox(runtime: ToolRuntime | Runtime) -> BackendProtocol:
     otherwise creates one with an auto-stop interval for automatic cleanup.
     Falls back to ephemeral state storage when sandbox is disabled or unavailable.
     """
-    if os.getenv("DAYTONA_SANDBOX_ENABLED", "true").lower() not in (
+    if os.getenv("DAYTONA_SANDBOX_ENABLED", "false").lower() not in (
         "1",
         "true",
         "yes",

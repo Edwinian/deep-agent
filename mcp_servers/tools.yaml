@@ -1,0 +1,36 @@
+# MCP Toolbox hotel demo (LangChain doc pattern, SQLite source for local dev).
+# https://docs.langchain.com/oss/python/integrations/tools/mcp_toolbox
+sources:
+  my-sqlite-source:
+    kind: sqlite
+    database: ${TOOLBOX_SQLITE_PATH}
+
+tools:
+  search-hotels-by-location:
+    kind: sqlite-sql
+    source: my-sqlite-source
+    description: Search for hotels based on location.
+    parameters:
+      - name: location
+        type: string
+        description: The location of the hotel.
+    statement: >-
+      SELECT id, name, location, price_tier
+      FROM hotels
+      WHERE location LIKE '%' || ? || '%';
+  book-hotel:
+    kind: sqlite-sql
+    source: my-sqlite-source
+    description: >-
+      Book a hotel by its ID. If the hotel is successfully booked, returns a
+      confirmation message.
+    parameters:
+      - name: hotel_id
+        type: integer
+        description: The ID of the hotel to book.
+    statement: UPDATE hotels SET booked = 1 WHERE id = ?;
+
+toolsets:
+  hotel_toolset:
+    - search-hotels-by-location
+    - book-hotel
