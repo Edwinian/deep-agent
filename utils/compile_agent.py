@@ -2,16 +2,35 @@
 
 from __future__ import annotations
 
+import logging
+import os
+
+from daytona import Daytona, DaytonaConfig
+from daytona.common.daytona import CreateSandboxFromSnapshotParams
+from daytona.common.errors import DaytonaNotFoundError
+from daytona.common.sandbox import SandboxState
 from deepagents import create_deep_agent
+from deepagents.backends import StateBackend
+from deepagents.backends.protocol import BackendProtocol
 from langchain.agents.middleware import PIIMiddleware
+from langchain.tools import ToolRuntime
 from langchain_core.language_models import BaseChatModel
+from langchain_daytona import DaytonaSandbox
+from langgraph.config import get_config
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.runtime import Runtime
 from langgraph.types import Checkpointer
 
 from agents.types import DeepAgent, InterruptOn, ModelConfig
 from tools.default_interrupt_on import DEFAULT_INTERRUPT_ON
 from utils.get_checkpointer import CheckpointerType, get_checkpointer
 from utils.resolve_model import resolve_model
+
+DEFAULT_SANDBOX_AUTO_STOP_INTERVAL_SECONDS = 3600
+
+logger = logging.getLogger(__name__)
+
+_daytona_client_instance: Daytona | None = None
 
 # Built-in PII types from LangChain guardrails, excluding url.
 # https://docs.langchain.com/oss/python/langchain/guardrails#built-in-pii-types-and-configuration
@@ -24,6 +43,99 @@ DEFAULT_PII_MIDDLEWARE = tuple(
     )
     for pii_type in ("email", "credit_card", "ip", "mac_address", "url")
 )
+
+
+def _get_daytona_client() -> Daytona:
+    """Return a process-wide Daytona client."""
+    global _daytona_client_instance
+    if _daytona_client_instance is None:
+        api_key = os.getenv("DAYTONA_API_KEY")
+        if not api_key:
+            raise ValueError("DAYTONA_API_KEY is required for Daytona sandbox backend")
+        _daytona_client_instance = Daytona(DaytonaConfig(api_key=api_key))
+    return _daytona_client_instance
+
+
+def _thread_id_from_runtime(runtime: ToolRuntime | Runtime) -> str:
+    """Resolve thread_id from tool or model middleware runtime objects."""
+    config = getattr(runtime, "config", None)
+    if config is not None:
+        thread_id = config.get("configurable", {}).get("thread_id")
+        if thread_id:
+            return str(thread_id)
+
+    execution_info = getattr(runtime, "execution_info", None)
+    if execution_info is not None and execution_info.thread_id:
+        return str(execution_info.thread_id)
+
+    thread_id = get_config().get("configurable", {}).get("thread_id")
+    if thread_id:
+        return str(thread_id)
+
+    raise ValueError(
+        "thread_id is required in config['configurable'] for sandbox backend"
+    )
+
+
+def _ensure_sandbox_started(client: Daytona, sandbox) -> None:
+    """Start a stopped Daytona sandbox before use."""
+    if sandbox.state == SandboxState.STARTED:
+        return
+    client.start(sandbox)
+
+
+def _resolve_daytona_sandbox(thread_id: str):
+    """Return an existing thread-scoped Daytona sandbox or create one."""
+    sandbox_name = f"thread-{thread_id}"
+    client = _get_daytona_client()
+
+    try:
+        sandbox = client.get(sandbox_name)
+    except DaytonaNotFoundError:
+        auto_stop_interval = int(
+            os.getenv(
+                "DAYTONA_SANDBOX_AUTO_STOP_INTERVAL_SECONDS",
+                str(DEFAULT_SANDBOX_AUTO_STOP_INTERVAL_SECONDS),
+            )
+        )
+        sandbox = client.create(
+            CreateSandboxFromSnapshotParams(
+                name=sandbox_name,
+                auto_stop_interval=auto_stop_interval,
+            )
+        )
+    else:
+        _ensure_sandbox_started(client, sandbox)
+
+    return sandbox
+
+
+def get_sandbox(runtime: ToolRuntime | Runtime) -> BackendProtocol:
+    """Resolve a thread-scoped Daytona sandbox backend for tool execution.
+
+    Reuses an existing sandbox named ``thread-{thread_id}`` when present;
+    otherwise creates one with an auto-stop interval for automatic cleanup.
+    Falls back to ephemeral state storage when sandbox is disabled or unavailable.
+    """
+    if os.getenv("DAYTONA_SANDBOX_ENABLED", "true").lower() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return StateBackend()
+
+    thread_id = _thread_id_from_runtime(runtime)
+
+    try:
+        sandbox = _resolve_daytona_sandbox(thread_id)
+        return DaytonaSandbox(sandbox=sandbox)
+    except Exception as exc:
+        logger.warning(
+            "Daytona sandbox unavailable for thread %s; using StateBackend: %s",
+            thread_id,
+            exc,
+        )
+        return StateBackend()
 
 
 def compile_agent(
@@ -68,6 +180,7 @@ def compile_agent(
         subagents=compiled_subagents,
         model=resolved_model,
         middleware=DEFAULT_PII_MIDDLEWARE,
+        backend=get_sandbox,
         checkpointer=checkpointer or get_checkpointer(CheckpointerType.ASYNC_SQLITE),
         interrupt_on=resolved_interrupt_on,
     )
