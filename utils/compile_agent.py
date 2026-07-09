@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from deepagents import create_deep_agent
+from langchain.agents.middleware import PIIMiddleware
 from langchain_core.language_models import BaseChatModel
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Checkpointer
@@ -11,6 +12,18 @@ from agents.types import DeepAgent, InterruptOn, ModelConfig
 from tools.default_interrupt_on import DEFAULT_INTERRUPT_ON
 from utils.get_checkpointer import CheckpointerType, get_checkpointer
 from utils.resolve_model import resolve_model
+
+# Built-in PII types from LangChain guardrails, excluding url.
+# https://docs.langchain.com/oss/python/langchain/guardrails#built-in-pii-types-and-configuration
+DEFAULT_PII_MIDDLEWARE = tuple(
+    PIIMiddleware(
+        pii_type,
+        apply_to_input=True,
+        apply_to_output=True,
+        apply_to_tool_results=True,
+    )
+    for pii_type in ("email", "credit_card", "ip", "mac_address", "url")
+)
 
 
 def compile_agent(
@@ -54,6 +67,7 @@ def compile_agent(
         system_prompt=agent["system_prompt"],
         subagents=compiled_subagents,
         model=resolved_model,
+        middleware=DEFAULT_PII_MIDDLEWARE,
         checkpointer=checkpointer or get_checkpointer(CheckpointerType.ASYNC_SQLITE),
         interrupt_on=resolved_interrupt_on,
     )
