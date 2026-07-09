@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+from typing import Any
 
 from daytona import Daytona, DaytonaConfig
 from daytona.common.daytona import CreateSandboxFromSnapshotParams
@@ -13,13 +15,15 @@ from deepagents import create_deep_agent
 from deepagents.backends import StateBackend
 from deepagents.backends.protocol import BackendProtocol
 from langchain.agents.middleware import PIIMiddleware
+from langchain.agents.middleware.types import AgentMiddleware, AgentState
 from langchain.tools import ToolRuntime
-from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage
 from langchain_daytona import DaytonaSandbox
 from langgraph.config import get_config
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
 from langgraph.types import Checkpointer
+from typing_extensions import override
 
 from agents.types import DeepAgent, InterruptOn, ModelConfig
 from tools.default_interrupt_on import DEFAULT_INTERRUPT_ON
@@ -32,6 +36,69 @@ logger = logging.getLogger(__name__)
 
 _daytona_client_instance: Daytona | None = None
 
+PII_GUARDRAIL_SYSTEM_APPENDIX = """\
+Privacy guardrails:
+- User messages may contain [REDACTED_*] placeholders where sensitive data was removed.
+- Never treat a placeholder as real data or repeat it as an answer.
+- If asked to recall, repeat, or confirm redacted information, explain that it was \
+redacted for privacy and you cannot access or disclose it."""
+
+REDACTED_PII_REFUSAL = (
+    "I cannot access or disclose that information because it was redacted "
+    "for privacy protection."
+)
+_REDACTED_ONLY_RESPONSE = re.compile(r"^\[REDACTED_[A-Z0-9_]+\]$")
+
+
+class RedactedPIIResponseMiddleware(AgentMiddleware):
+    """Replace placeholder-only AI replies and drop internal reasoning metadata."""
+
+    @override
+    def after_model(
+        self,
+        state: AgentState[Any],
+        runtime: Runtime[Any],
+    ) -> dict[str, Any] | None:
+        messages = state["messages"]
+        if not messages:
+            return None
+
+        last_ai_idx = None
+        last_ai_msg = None
+        for i in range(len(messages) - 1, -1, -1):
+            if isinstance(messages[i], AIMessage):
+                last_ai_msg = messages[i]
+                last_ai_idx = i
+                break
+
+        if last_ai_idx is None or last_ai_msg is None:
+            return None
+
+        content = str(last_ai_msg.content or "").strip()
+        additional_kwargs = dict(last_ai_msg.additional_kwargs or {})
+        additional_kwargs.pop("reasoning_content", None)
+
+        if _REDACTED_ONLY_RESPONSE.fullmatch(content):
+            content = REDACTED_PII_REFUSAL
+
+        if (
+            content == str(last_ai_msg.content or "").strip()
+            and additional_kwargs == (last_ai_msg.additional_kwargs or {})
+        ):
+            return None
+
+        updated_message = AIMessage(
+            content=content,
+            id=last_ai_msg.id,
+            name=last_ai_msg.name,
+            tool_calls=last_ai_msg.tool_calls,
+            additional_kwargs=additional_kwargs,
+        )
+        new_messages = list(messages)
+        new_messages[last_ai_idx] = updated_message
+        return {"messages": new_messages}
+
+
 # Built-in PII types from LangChain guardrails, excluding url.
 # https://docs.langchain.com/oss/python/langchain/guardrails#built-in-pii-types-and-configuration
 DEFAULT_PII_MIDDLEWARE = tuple(
@@ -42,7 +109,7 @@ DEFAULT_PII_MIDDLEWARE = tuple(
         apply_to_tool_results=True,
     )
     for pii_type in ("email", "credit_card", "ip", "mac_address", "url")
-)
+) + (RedactedPIIResponseMiddleware(),)
 
 
 def _get_daytona_client() -> Daytona:
@@ -176,7 +243,7 @@ def compile_agent(
 
     return create_deep_agent(
         tools=agent.get("tools"),
-        system_prompt=agent["system_prompt"],
+        system_prompt=f"{agent['system_prompt']}\n\n{PII_GUARDRAIL_SYSTEM_APPENDIX}",
         subagents=compiled_subagents,
         model=resolved_model,
         middleware=DEFAULT_PII_MIDDLEWARE,

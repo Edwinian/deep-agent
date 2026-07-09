@@ -142,6 +142,16 @@ class InvokeService:
         content = data.get("content")
         if not isinstance(content, str):
             data["content"] = InvokeService.content_to_text(content)
+
+        if message.get("type") == "ai":
+            additional_kwargs = data.get("additional_kwargs")
+            if isinstance(additional_kwargs, dict) and "reasoning_content" in additional_kwargs:
+                data["additional_kwargs"] = {
+                    key: value
+                    for key, value in additional_kwargs.items()
+                    if key != "reasoning_content"
+                }
+
         return message
 
     @staticmethod
