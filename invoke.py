@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import sys
-import uuid
 
 import httpx
 
@@ -25,11 +24,15 @@ def invoke_agent(
     model_config: dict | None = None,
     timeout: float = 300.0,
 ) -> dict:
-    """Call the /invoke endpoint and return the JSON response."""
-    payload = {
+    """Call the /invoke endpoint and return the JSON response.
+
+    Reuse ``thread_id`` across calls for the same user session. Omit it only for
+    a one-off request; the server will assign one. Call DELETE /threads/{id}
+    when the session ends.
+    """
+    payload: dict = {
         "agent_id": agent_id,
         "message": message,
-        "thread_id": thread_id or str(uuid.uuid4()),
     }
     if model_config is not None:
         payload["model_config"] = model_config

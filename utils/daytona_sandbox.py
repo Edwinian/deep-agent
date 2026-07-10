@@ -43,7 +43,8 @@ from langgraph.config import get_config
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SANDBOX_AUTO_STOP_INTERVAL_SECONDS = 3600
+DEFAULT_SANDBOX_AUTO_STOP_INTERVAL_MINUTES = 30
+DEFAULT_SANDBOX_AUTO_DELETE_INTERVAL_MINUTES = 10080
 DEFAULT_WORKSPACE_THREADS_SUBDIR = "threads"
 
 _daytona_client_instance: Daytona | None = None
@@ -97,6 +98,51 @@ def _thread_id_from_config() -> str:
     )
 
 
+def _sandbox_name(thread_id: str) -> str:
+    return f"thread-{thread_id}"
+
+
+def _sandbox_auto_stop_interval_minutes() -> int:
+    """Idle minutes before Daytona auto-stops a sandbox."""
+    return int(
+        os.getenv(
+            "DAYTONA_SANDBOX_AUTO_STOP_INTERVAL_MINUTES",
+            str(DEFAULT_SANDBOX_AUTO_STOP_INTERVAL_MINUTES),
+        )
+    )
+
+
+def _sandbox_auto_delete_interval_minutes() -> int | None:
+    """Idle minutes before Daytona auto-deletes a sandbox (None disables)."""
+    raw = os.getenv(
+        "DAYTONA_SANDBOX_AUTO_DELETE_INTERVAL_MINUTES",
+        str(DEFAULT_SANDBOX_AUTO_DELETE_INTERVAL_MINUTES),
+    ).strip()
+    if not raw or raw.lower() in {"0", "none", "false", "off"}:
+        return None
+    return int(raw)
+
+
+def delete_daytona_sandbox(thread_id: str) -> bool:
+    """Delete the Daytona sandbox for a thread, if it exists."""
+    if not daytona_sandbox_enabled():
+        return False
+
+    client = _get_daytona_client()
+    sandbox_name = _sandbox_name(thread_id)
+    try:
+        sandbox = client.get(sandbox_name)
+    except DaytonaNotFoundError:
+        return False
+
+    client.delete(sandbox)
+    suffix = f":{thread_id}"
+    stale_keys = [key for key in _daytona_workspace_cache if key.endswith(suffix)]
+    for key in stale_keys:
+        del _daytona_workspace_cache[key]
+    return True
+
+
 def _ensure_sandbox_started(client: Daytona, sandbox: Sandbox) -> None:
     """Start a stopped Daytona sandbox before use."""
     if sandbox.state == SandboxState.STARTED:
@@ -106,29 +152,24 @@ def _ensure_sandbox_started(client: Daytona, sandbox: Sandbox) -> None:
 
 def _resolve_daytona_sandbox(thread_id: str) -> Sandbox:
     """Return an existing thread-scoped Daytona sandbox or create one."""
-    sandbox_name = f"thread-{thread_id}"
+    sandbox_name = _sandbox_name(thread_id)
     client = _get_daytona_client()
 
     try:
         sandbox = client.get(sandbox_name)
     except DaytonaNotFoundError:
-        # Daytona ``auto_stop_interval`` is idle time in *minutes*, not seconds.
-        auto_stop_interval = int(
-            os.getenv(
-                "DAYTONA_SANDBOX_AUTO_STOP_INTERVAL_SECONDS",
-                str(DEFAULT_SANDBOX_AUTO_STOP_INTERVAL_SECONDS),
-            )
-        )
-        sandbox = client.create(
-            CreateSandboxFromSnapshotParams(
-                name=sandbox_name,
-                auto_stop_interval=auto_stop_interval,
-                labels={
-                    "app": "deep-agents-from-scratch",
-                    "thread_id": thread_id,
-                },
-            )
-        )
+        create_params: dict[str, object] = {
+            "name": sandbox_name,
+            "auto_stop_interval": _sandbox_auto_stop_interval_minutes(),
+            "labels": {
+                "app": "deep-agents-from-scratch",
+                "thread_id": thread_id,
+            },
+        }
+        auto_delete_interval = _sandbox_auto_delete_interval_minutes()
+        if auto_delete_interval is not None:
+            create_params["auto_delete_interval"] = auto_delete_interval
+        sandbox = client.create(CreateSandboxFromSnapshotParams(**create_params))
     else:
         _ensure_sandbox_started(client, sandbox)
 

@@ -122,6 +122,22 @@ async def init_sqlite_checkpointer(
     return _SQLITE_SAVER
 
 
+async def get_sqlite_checkpointer() -> AsyncSqliteSaver:
+    """Return the initialized process-wide async SQLite checkpointer."""
+    if _SQLITE_SAVER is None:
+        raise RuntimeError(
+            "SQLite checkpointer is not initialized. Call init_sqlite_checkpointer() "
+            "from the FastAPI lifespan before handling requests."
+        )
+    return _SQLITE_SAVER
+
+
+async def delete_thread_checkpoints(thread_id: str) -> None:
+    """Delete all LangGraph checkpoints and writes for a thread."""
+    checkpointer = await get_sqlite_checkpointer()
+    await checkpointer.adelete_thread(thread_id)
+
+
 async def close_sqlite_checkpointer() -> None:
     """Close the process-wide async SQLite checkpointer."""
     global _SQLITE_SAVER, _sqlite_exit_stack

@@ -11,6 +11,7 @@ from langchain_core.runnables.config import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Checkpointer
 
+from agents.ids import GENERAL_AGENT_ID
 from agents.types import DeepAgent, ModelConfig
 from db.agent_store import AgentNotFoundError
 from schemas.invoke_request import InvokeAgent
@@ -19,7 +20,10 @@ from schemas.invoke_response import (
     InvokeStatus,
     SerializedMessage,
 )
+from schemas.thread_teardown_response import ThreadTeardownResponse
 from utils.compile_agent import compile_agent
+from utils.daytona_sandbox import delete_daytona_sandbox
+from utils.get_checkpointer import delete_thread_checkpoints
 from utils.hitl import (
     build_resume_command,
     collect_action_requests,
@@ -32,6 +36,11 @@ from utils.resolve_agent import resolve_agent
 _INTERRUPT_NOT_FOUND_DETAIL = (
     "No interrupted tool calls found for this thread. "
     "The thread_id may be wrong or the checkpoint database was reset."
+)
+
+_THREAD_AWAITING_PERMISSION_DETAIL = (
+    "Thread is awaiting tool permission. Approve, edit, or reject the pending "
+    "action before deleting the thread."
 )
 
 
@@ -279,4 +288,47 @@ class InvokeService:
             thread_id=thread_id,
             agent_id=agent_id,
             raw_result=result,
+        )
+
+    async def _agent_ids_for_hitl_check(self, agent_id: int | None) -> list[int]:
+        if agent_id is not None:
+            return [agent_id]
+        if self._agent_cache:
+            return list(self._agent_cache.keys())
+        return [GENERAL_AGENT_ID]
+
+    async def thread_awaiting_tool_permission(
+        self,
+        thread_id: str,
+        *,
+        agent_id: int | None = None,
+    ) -> bool:
+        """Return True when the thread has unresolved human-in-the-loop interrupts."""
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+        for candidate_agent_id in await self._agent_ids_for_hitl_check(agent_id):
+            agent = await self.get_compiled_agent(candidate_agent_id, None)
+            snapshot = await agent.aget_state(config, subgraphs=True)
+            if collect_pending_interrupts(snapshot):
+                return True
+        return False
+
+    async def teardown_thread(
+        self,
+        thread_id: str,
+        *,
+        agent_id: int | None = None,
+    ) -> ThreadTeardownResponse:
+        """Delete LangGraph checkpoints and the Daytona sandbox for a thread."""
+        if await self.thread_awaiting_tool_permission(thread_id, agent_id=agent_id):
+            raise HTTPException(
+                status_code=409,
+                detail=_THREAD_AWAITING_PERMISSION_DETAIL,
+            )
+
+        await delete_thread_checkpoints(thread_id)
+        sandbox_deleted = delete_daytona_sandbox(thread_id)
+        return ThreadTeardownResponse(
+            thread_id=thread_id,
+            checkpoint_deleted=True,
+            sandbox_deleted=sandbox_deleted,
         )

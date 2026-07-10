@@ -55,6 +55,11 @@ class StreamService:
             pass
         return True
 
+    async def has_active_stream(self, thread_id: str) -> bool:
+        """Return True when a /stream run is in flight for this thread."""
+        async with self._runs_lock:
+            return thread_id in self._active_runs
+
     @staticmethod
     def emit_stream_chunk(chunk: StreamTextChunk) -> str:
         """Serialize one SSE ``data`` frame."""

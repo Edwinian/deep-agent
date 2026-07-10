@@ -8,12 +8,13 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from invoke_service import InvokeService
 from schemas.invoke_request import InvokeAgent
 from schemas.invoke_response import InvokeResponse
+from schemas.thread_teardown_response import ThreadTeardownResponse
 from stream_service import StreamService
 from db.agent_store import init_agent_db
 from utils.get_checkpointer import close_sqlite_checkpointer, init_sqlite_checkpointer
@@ -56,6 +57,34 @@ async def cancel_stream(thread_id: str) -> dict[str, bool | str]:
             detail=f"No active stream found for thread_id {thread_id!r}",
         )
     return {"thread_id": thread_id, "cancelled": True}
+
+
+@app.delete("/threads/{thread_id}")
+async def delete_thread(
+    thread_id: str,
+    agent_id: int | None = Query(
+        default=None,
+        description=(
+            "Agent used to detect awaiting_tool_permission before teardown. "
+            "Defaults to the general agent when omitted."
+        ),
+    ),
+) -> ThreadTeardownResponse:
+    """Delete checkpoints and the Daytona sandbox for a completed thread.
+
+    The client owns ``thread_id`` per user session and calls this when the
+    session ends. Returns 409 if the thread is awaiting HITL approval or has
+    an active /stream run.
+    """
+    if await stream_service.has_active_stream(thread_id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Thread has an active stream. Cancel it with "
+                f"POST /cancel-stream/{thread_id} before deleting."
+            ),
+        )
+    return await invoke_service.teardown_thread(thread_id, agent_id=agent_id)
 
 
 if __name__ == "__main__":
