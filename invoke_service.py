@@ -21,6 +21,7 @@ from schemas.invoke_response import (
     SerializedMessage,
 )
 from schemas.thread_teardown_response import ThreadTeardownResponse
+from tools.mcp_auth import mcp_access_token_context
 from utils.compile_agent import compile_agent
 from utils.daytona_sandbox import delete_daytona_sandbox
 from utils.get_checkpointer import delete_thread_checkpoints
@@ -251,6 +252,7 @@ class InvokeService:
         payload: InvokeAgent,
         *,
         config: RunnableConfig,
+        access_token: str | None = None,
     ) -> dict[str, Any]:
         """Run or resume one agent turn and return the final graph state."""
         thread_id = (
@@ -268,9 +270,15 @@ class InvokeService:
             payload,
             config=config,
         )
-        return await agent.ainvoke(input_state, config=config)
+        with mcp_access_token_context(access_token):
+            return await agent.ainvoke(input_state, config=config)
 
-    async def invoke(self, payload: InvokeAgent) -> InvokeResponse:
+    async def invoke(
+        self,
+        payload: InvokeAgent,
+        *,
+        access_token: str | None = None,
+    ) -> InvokeResponse:
         """Compile the requested agent and run or resume one turn."""
         model_config = payload.get("model_config")
         agent_id = payload["agent_id"]
@@ -282,6 +290,7 @@ class InvokeService:
             agent,
             payload,
             config=config,
+            access_token=access_token,
         )
 
         return self.build_invoke_response(

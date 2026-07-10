@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from invoke_service import InvokeService
@@ -17,6 +17,7 @@ from schemas.invoke_response import InvokeResponse
 from schemas.thread_teardown_response import ThreadTeardownResponse
 from stream_service import StreamService
 from db.agent_store import init_agent_db
+from tools.mcp_auth import parse_authorization_header
 from utils.get_checkpointer import close_sqlite_checkpointer, init_sqlite_checkpointer
 
 
@@ -36,15 +37,23 @@ stream_service = StreamService(invoke_service)
 
 
 @app.post("/invoke")
-async def invoke(payload: InvokeAgent) -> InvokeResponse:
+async def invoke(
+    payload: InvokeAgent,
+    authorization: str | None = Header(default=None),
+) -> InvokeResponse:
     """Compile the requested agent and run or resume one turn."""
-    return await invoke_service.invoke(payload)
+    access_token = parse_authorization_header(authorization)
+    return await invoke_service.invoke(payload, access_token=access_token)
 
 
 @app.post("/stream")
-async def stream(payload: InvokeAgent) -> StreamingResponse:
+async def stream(
+    payload: InvokeAgent,
+    authorization: str | None = Header(default=None),
+) -> StreamingResponse:
     """Compile the requested agent and stream v3 projections over SSE."""
-    return await stream_service.stream(payload)
+    access_token = parse_authorization_header(authorization)
+    return await stream_service.stream(payload, access_token=access_token)
 
 
 @app.post("/cancel-stream/{thread_id}")

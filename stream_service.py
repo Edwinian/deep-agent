@@ -24,6 +24,7 @@ from schemas.invoke_response import (
     StreamTextChunk,
 )
 from schemas.content_type import CONTENT_TYPE_KEY
+from tools.mcp_auth import mcp_access_token_context
 from utils.hitl import collect_action_requests
 from utils.langfuse_tracing import with_langfuse_config
 
@@ -766,6 +767,7 @@ class StreamService:
         agent_id: int,
         config: RunnableConfig,
         input_state: Any,
+        access_token: str | None = None,
     ) -> AsyncIterator[str]:
         """Stream message and tool-call projections via ``astream_events(version="v3")``.
 
@@ -791,86 +793,92 @@ class StreamService:
                         print(token, end="", flush=True)
                 print()
         """
-        run: AsyncGraphRunStream = await agent.astream_events(
-            input_state,
-            config=config,
-            version=STREAM_EVENTS_VERSION,
-        )
+        with mcp_access_token_context(access_token):
+            run: AsyncGraphRunStream = await agent.astream_events(
+                input_state,
+                config=config,
+                version=STREAM_EVENTS_VERSION,
+            )
 
-        seen_interrupt_ids: set[str] = set()
+            seen_interrupt_ids: set[str] = set()
 
-        async with self._runs_lock:
-            self._active_runs[thread_id] = run
+            async with self._runs_lock:
+                self._active_runs[thread_id] = run
 
-        try:
-            async with run:
-                async for name, item in self.merge_run_projections(
-                    run,
-                    seen_interrupt_ids=seen_interrupt_ids,
-                ):
-                    if name == "messages":
-                        async for line in self.yield_message_chunks(
-                            item,
-                            thread_id=thread_id,
-                            agent_id=agent_id,
-                        ):
-                            yield line
-                        continue
+            try:
+                async with run:
+                    async for name, item in self.merge_run_projections(
+                        run,
+                        seen_interrupt_ids=seen_interrupt_ids,
+                    ):
+                        if name == "messages":
+                            async for line in self.yield_message_chunks(
+                                item,
+                                thread_id=thread_id,
+                                agent_id=agent_id,
+                            ):
+                                yield line
+                            continue
 
-                    if name == "values":
-                        async for line in self.yield_interrupt_chunks(
-                            item,
-                            thread_id=thread_id,
-                            agent_id=agent_id,
-                            seen_interrupt_ids=seen_interrupt_ids,
-                        ):
-                            yield line
-                        continue
+                        if name == "values":
+                            async for line in self.yield_interrupt_chunks(
+                                item,
+                                thread_id=thread_id,
+                                agent_id=agent_id,
+                                seen_interrupt_ids=seen_interrupt_ids,
+                            ):
+                                yield line
+                            continue
 
-                    if name == "tool_calls":
-                        async for line in self.yield_run_tool_call_chunks(
-                            item,
-                            thread_id=thread_id,
-                            agent_id=agent_id,
-                            seen_interrupt_ids=seen_interrupt_ids,
-                        ):
-                            yield line
-                        continue
+                        if name == "tool_calls":
+                            async for line in self.yield_run_tool_call_chunks(
+                                item,
+                                thread_id=thread_id,
+                                agent_id=agent_id,
+                                seen_interrupt_ids=seen_interrupt_ids,
+                            ):
+                                yield line
+                            continue
 
-                    if name == "subagents":
-                        async for line in self.yield_subagent_chunks(
-                            item,
-                            thread_id=thread_id,
-                            agent_id=agent_id,
-                            seen_interrupt_ids=seen_interrupt_ids,
-                        ):
-                            yield line
+                        if name == "subagents":
+                            async for line in self.yield_subagent_chunks(
+                                item,
+                                thread_id=thread_id,
+                                agent_id=agent_id,
+                                seen_interrupt_ids=seen_interrupt_ids,
+                            ):
+                                yield line
 
-                final_state = await run.output()
-                raw_result: dict[str, Any] = (
-                    dict(final_state) if isinstance(final_state, dict) else {}
-                )
-                if isinstance(final_state, dict) and await run.interrupted():
-                    run_interrupts = await run.interrupts()
-                    if run_interrupts and not raw_result.get("__interrupt__"):
-                        raw_result["__interrupt__"] = run_interrupts
+                    final_state = await run.output()
+                    raw_result: dict[str, Any] = (
+                        dict(final_state) if isinstance(final_state, dict) else {}
+                    )
+                    if isinstance(final_state, dict) and await run.interrupted():
+                        run_interrupts = await run.interrupts()
+                        if run_interrupts and not raw_result.get("__interrupt__"):
+                            raw_result["__interrupt__"] = run_interrupts
 
+                    async with self._runs_lock:
+                        cancelled = thread_id in self._cancel_requested
+                        self._cancel_requested.discard(thread_id)
+
+                    yield await self.yield_run_finished_chunk(
+                        thread_id=thread_id,
+                        agent_id=agent_id,
+                        raw_result=raw_result,
+                        cancelled=cancelled,
+                    )
+            finally:
                 async with self._runs_lock:
-                    cancelled = thread_id in self._cancel_requested
+                    self._active_runs.pop(thread_id, None)
                     self._cancel_requested.discard(thread_id)
 
-                yield await self.yield_run_finished_chunk(
-                    thread_id=thread_id,
-                    agent_id=agent_id,
-                    raw_result=raw_result,
-                    cancelled=cancelled,
-                )
-        finally:
-            async with self._runs_lock:
-                self._active_runs.pop(thread_id, None)
-                self._cancel_requested.discard(thread_id)
-
-    async def stream(self, payload: InvokeAgent) -> StreamingResponse:
+    async def stream(
+        self,
+        payload: InvokeAgent,
+        *,
+        access_token: str | None = None,
+    ) -> StreamingResponse:
         """Compile the requested agent and stream v3 message and tool-call projections."""
         model_config = payload.get("model_config")
         agent_id = payload["agent_id"]
@@ -894,6 +902,7 @@ class StreamService:
                 agent_id=agent_id,
                 config=config,
                 input_state=input_state,
+                access_token=access_token,
             ),
             media_type="text/event-stream",
             headers={
