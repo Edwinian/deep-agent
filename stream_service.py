@@ -25,6 +25,7 @@ from schemas.invoke_response import (
 )
 from schemas.content_type import CONTENT_TYPE_KEY
 from tools.mcp_auth import mcp_access_token_context
+from utils.daytona_sandbox import sync_skills_for_thread
 from utils.hitl import collect_action_requests
 from utils.langfuse_tracing import with_langfuse_config
 
@@ -793,6 +794,7 @@ class StreamService:
                         print(token, end="", flush=True)
                 print()
         """
+        sync_skills_for_thread(agent_id, thread_id)
         with mcp_access_token_context(access_token):
             run: AsyncGraphRunStream = await agent.astream_events(
                 input_state,

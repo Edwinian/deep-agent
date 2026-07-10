@@ -8,6 +8,7 @@ class DeepAgentField(str, Enum):
 
     SUBAGENTS = "subagents"
     MODEL_CONFIG = "model_config"
+    SKILL_PATHS = "skill_paths"
 
 
 DEEP_AGENT_ONLY_FIELDS = frozenset(field.value for field in DeepAgentField)

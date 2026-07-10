@@ -23,7 +23,7 @@ from schemas.invoke_response import (
 from schemas.thread_teardown_response import ThreadTeardownResponse
 from tools.mcp_auth import mcp_access_token_context
 from utils.compile_agent import compile_agent
-from utils.daytona_sandbox import delete_daytona_sandbox
+from utils.daytona_sandbox import delete_daytona_sandbox, sync_skills_for_thread
 from utils.get_checkpointer import delete_thread_checkpoints
 from utils.hitl import (
     build_resume_command,
@@ -270,6 +270,8 @@ class InvokeService:
             payload,
             config=config,
         )
+        if thread_id:
+            sync_skills_for_thread(payload["agent_id"], thread_id)
         with mcp_access_token_context(access_token):
             return await agent.ainvoke(input_state, config=config)
 

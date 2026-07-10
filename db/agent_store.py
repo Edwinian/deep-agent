@@ -19,8 +19,13 @@ class AgentNotFoundError(LookupError):
     """Raised when no agent row exists for the requested ID."""
 
 
+class SkillNotFoundError(LookupError):
+    """Raised when no skill row exists for the requested ID."""
+
+
 @dataclass(frozen=True)
 class BaseRow:
+    id: int
     created_at: str
     updated_at: str | None
     deleted_at: str | None
@@ -28,19 +33,25 @@ class BaseRow:
 
 @dataclass(frozen=True)
 class SystemPromptRow(BaseRow):
-    id: int
+    content: str
+
+
+@dataclass(frozen=True)
+class SkillRow(BaseRow):
+    name: str
+    description: str
     content: str
 
 
 @dataclass(frozen=True)
 class AgentRow(BaseRow):
-    id: int
     name: str
     description: str
     system_prompt_id: int
     subagent_ids: list[int] | None
     model: str | None
     tool_ids: list[int] | None
+    skill_ids: list[int] | None
 
 
 def _ensure_parent_dir(conn_string: str) -> None:
@@ -74,8 +85,9 @@ def _parse_optional_id_list(
     return _parse_id_list(raw, field_name=field_name)
 
 
-def _base_row_fields(row: sqlite3.Row) -> dict[str, str | None]:
+def _base_row_fields(row: sqlite3.Row) -> dict[str, int | str | None]:
     return {
+        "id": int(row["id"]),
         "created_at": str(row["created_at"]),
         "updated_at": (
             str(row["updated_at"]) if row["updated_at"] is not None else None
@@ -89,7 +101,6 @@ def _base_row_fields(row: sqlite3.Row) -> dict[str, str | None]:
 def _row_to_agent(row: sqlite3.Row) -> AgentRow:
     return AgentRow(
         **_base_row_fields(row),
-        id=int(row["id"]),
         name=str(row["name"]),
         description=str(row["description"]),
         system_prompt_id=int(row["system_prompt_id"]),
@@ -99,6 +110,7 @@ def _row_to_agent(row: sqlite3.Row) -> AgentRow:
         ),
         model=str(row["model"]) if row["model"] is not None else None,
         tool_ids=_parse_optional_id_list(row["tool_ids"], field_name="tool_ids"),
+        skill_ids=_parse_optional_id_list(row["skill_ids"], field_name="skill_ids"),
     )
 
 
@@ -121,7 +133,7 @@ def _column_is_not_null(conn: sqlite3.Connection, column_name: str) -> bool:
 
 def _migrate_timestamp_columns(conn: sqlite3.Connection) -> None:
     """Add created_at, updated_at, and deleted_at to existing tables."""
-    for table in ("SystemPrompt", "Agent"):
+    for table in ("SystemPrompt", "Skill", "Agent"):
         columns = _table_columns(conn, table)
         if "created_at" not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN created_at TEXT")
@@ -243,6 +255,26 @@ def _migrate_agent_table(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_skill_schema(conn: sqlite3.Connection) -> None:
+    """Add Skill table and nullable skill_ids on Agent."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS Skill (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT,
+            deleted_at TEXT
+        );
+        """
+    )
+    columns = _agent_table_columns(conn)
+    if "skill_ids" not in columns:
+        conn.execute("ALTER TABLE Agent ADD COLUMN skill_ids TEXT")
+
+
 def init_agent_db(conn_string: str | None = None) -> None:
     """Create agent tables and seed defaults when empty."""
     conn = _connect(conn_string)
@@ -257,6 +289,16 @@ def init_agent_db(conn_string: str | None = None) -> None:
                 deleted_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS Skill (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT,
+                deleted_at TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS Agent (
                 id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -265,6 +307,7 @@ def init_agent_db(conn_string: str | None = None) -> None:
                 subagent_ids TEXT,
                 model TEXT,
                 tool_ids TEXT,
+                skill_ids TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT,
                 deleted_at TEXT
@@ -274,6 +317,7 @@ def init_agent_db(conn_string: str | None = None) -> None:
         conn.commit()
         _migrate_timestamp_columns(conn)
         _migrate_agent_table(conn)
+        _migrate_skill_schema(conn)
         conn.commit()
 
         count = conn.execute("SELECT COUNT(*) FROM Agent").fetchone()[0]
@@ -306,7 +350,6 @@ def get_system_prompt(
             raise AgentNotFoundError(f"Unknown system_prompt_id: {prompt_id}")
         return SystemPromptRow(
             **_base_row_fields(row),
-            id=int(row["id"]),
             content=str(row["content"]),
         )
     finally:
@@ -331,6 +374,7 @@ def get_agent(
                 subagent_ids,
                 model,
                 tool_ids,
+                skill_ids,
                 created_at,
                 updated_at,
                 deleted_at
@@ -342,6 +386,53 @@ def get_agent(
         if row is None:
             raise AgentNotFoundError(f"Unknown agent_id: {agent_id}")
         return _row_to_agent(row)
+    finally:
+        conn.close()
+
+
+def get_skill(
+    skill_id: int,
+    *,
+    conn_string: str | None = None,
+) -> SkillRow:
+    """Load a skill row by ID."""
+    conn = _connect(conn_string)
+    try:
+        row = conn.execute(
+            """
+            SELECT id, name, description, content, created_at, updated_at, deleted_at
+            FROM Skill
+            WHERE id = ?
+            """,
+            (skill_id,),
+        ).fetchone()
+        if row is None:
+            raise SkillNotFoundError(f"Unknown skill_id: {skill_id}")
+        return SkillRow(
+            **_base_row_fields(row),
+            name=str(row["name"]),
+            description=str(row["description"]),
+            content=str(row["content"]),
+        )
+    finally:
+        conn.close()
+
+
+def get_skills(
+    skill_ids: list[int],
+    *,
+    conn_string: str | None = None,
+) -> list[SkillRow]:
+    """Load skill rows for the given IDs, preserving order."""
+    return [get_skill(skill_id, conn_string=conn_string) for skill_id in skill_ids]
+
+
+def list_skill_ids(*, conn_string: str | None = None) -> list[int]:
+    """Return all configured skill IDs."""
+    conn = _connect(conn_string)
+    try:
+        rows = conn.execute("SELECT id FROM Skill ORDER BY id").fetchall()
+        return [int(row["id"]) for row in rows]
     finally:
         conn.close()
 

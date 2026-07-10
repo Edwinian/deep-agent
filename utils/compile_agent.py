@@ -132,6 +132,8 @@ def compile_agent(
         else agent.get("interrupt_on", DEFAULT_INTERRUPT_ON)
     )
 
+    skill_paths = agent.get("skill_paths")
+
     return create_deep_agent(
         tools=agent.get("tools"),
         system_prompt=f"{agent['system_prompt']}\n\n{PII_GUARDRAIL_SYSTEM_APPENDIX}",
@@ -142,4 +144,5 @@ def compile_agent(
         backend=filesystem_backend(),
         checkpointer=checkpointer or get_checkpointer(CheckpointerType.ASYNC_SQLITE),
         interrupt_on=resolved_interrupt_on,
+        skills=skill_paths,
     )

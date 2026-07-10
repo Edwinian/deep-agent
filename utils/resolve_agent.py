@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from db.agent_store import AgentNotFoundError, get_agent, get_system_prompt
+from db.agent_store import AgentNotFoundError, get_agent, get_skills, get_system_prompt
 from agents.types import DeepAgent
 from tools.tool_registry import resolve_tools
 from tools.web_search_tool import get_today_str
+from utils.daytona_sandbox import load_skills
 
 
 def _format_system_prompt(content: str) -> str:
@@ -43,6 +44,10 @@ async def resolve_agent(
         for subagent_id in row.subagent_ids:
             subagents.append(await resolve_agent(subagent_id, _visited=visited))
         spec["subagents"] = subagents
+
+    if row.skill_ids:
+        skill_rows = get_skills(row.skill_ids)
+        spec["skill_paths"] = load_skills(skill_rows)
 
     return spec
 

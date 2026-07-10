@@ -6,6 +6,7 @@ import os
 
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.sessions import StreamableHttpConnection
 
 from tools.mcp_auth import MCP_AUTH_INTERCEPTOR, authorization_headers
 
@@ -21,8 +22,8 @@ async def get_weather_mcp_tools(token: str | None = None) -> list[BaseTool]:
             HTTP requests. Per-invoke tokens are also read from
             ``tools.mcp_auth.mcp_access_token`` when agents are cached.
     """
-    connection: dict[str, object] = {
-        "transport": "http",
+    connection: StreamableHttpConnection = {
+        "transport": "streamable_http",
         "url": WEATHER_MCP_URL,
     }
     headers = authorization_headers(token)

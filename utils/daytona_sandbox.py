@@ -41,6 +41,8 @@ from deepagents.backends.protocol import (
 from langchain_daytona import DaytonaSandbox
 from langgraph.config import get_config
 
+from db.agent_store import SkillRow
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_SANDBOX_AUTO_STOP_INTERVAL_MINUTES = 30
@@ -564,3 +566,83 @@ def build_daytona_backend(sandbox: Sandbox, thread_id: str) -> BackendProtocol:
 
     inner = DaytonaSandbox(sandbox=sandbox)
     return PrefixedSandboxBackend(inner, physical_root=physical_root)
+
+
+SKILLS_ROOT = "/skills"
+
+
+def _skill_file_path(skill_id: int) -> str:
+    return f"{SKILLS_ROOT}/skill_{skill_id}/SKILL.md"
+
+
+def _skills_root_paths() -> list[str]:
+    return [f"{SKILLS_ROOT}/"]
+
+
+def _backend_for_skills(*, thread_id: str | None) -> BackendProtocol:
+    if daytona_sandbox_enabled():
+        if thread_id is None:
+            msg = "thread_id is required to sync skills to a Daytona sandbox"
+            raise ValueError(msg)
+        sandbox = _resolve_daytona_sandbox(thread_id)
+        return build_daytona_backend(sandbox, thread_id)
+    return _state_backend
+
+
+def _ensure_parent_dir(backend: BackendProtocol, file_path: str) -> None:
+    parent = file_path.rsplit("/", 1)[0]
+    if parent in {"", "/"}:
+        return
+    if isinstance(backend, PrefixedSandboxBackend):
+        physical_parent = backend._to_physical(parent)
+        quoted = shlex.quote(physical_parent)
+        result = backend._inner.execute(f"mkdir -p {quoted}", timeout=60)
+    elif isinstance(backend, SandboxBackendProtocol):
+        quoted = shlex.quote(parent)
+        result = backend.execute(f"mkdir -p {quoted}", timeout=60)
+    else:
+        return
+    if result.exit_code != 0:
+        msg = (result.output or "").strip() or f"exit code {result.exit_code}"
+        raise RuntimeError(f"Failed to create skill directory {parent}: {msg}")
+
+
+def load_skills(
+    skill_rows: list[SkillRow],
+    *,
+    thread_id: str | None = None,
+) -> list[str]:
+    """Write skills into the active backend and return skill source paths.
+
+    Each skill is stored as ``/skills/skill_<id>/SKILL.md``. When Daytona is
+    enabled, ``thread_id`` is required to provision files in the thread sandbox.
+    Without a thread id, only the virtual skill root path is returned so agents
+    can be compiled before a run starts.
+    """
+    if not skill_rows:
+        return []
+
+    if daytona_sandbox_enabled() and thread_id is None:
+        return _skills_root_paths()
+
+    backend = _backend_for_skills(thread_id=thread_id)
+    for row in skill_rows:
+        skill_file = _skill_file_path(row.id)
+        _ensure_parent_dir(backend, skill_file)
+        result = backend.write(skill_file, row.content)
+        if result.error is not None:
+            raise RuntimeError(
+                f"Failed to write skill {row.id} to {skill_file}: {result.error}"
+            )
+
+    return _skills_root_paths()
+
+
+def sync_skills_for_thread(agent_id: int, thread_id: str) -> list[str]:
+    """Load an agent's configured skills from SQLite into the thread sandbox."""
+    from db.agent_store import get_agent, get_skills
+
+    row = get_agent(agent_id)
+    if not row.skill_ids:
+        return []
+    return load_skills(get_skills(row.skill_ids), thread_id=thread_id)

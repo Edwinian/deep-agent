@@ -39,6 +39,8 @@ class DeepAgent(SubAgent, total=False):
     """Optional nested agents for delegation (:attr:`DeepAgentField.SUBAGENTS`)."""
     model_config: NotRequired[ModelConfig | None]
     """Optional model settings used when compiling the agent (:attr:`DeepAgentField.MODEL_CONFIG`)."""
+    skill_paths: NotRequired[list[str] | None]
+    """Optional skill file paths loaded for this agent."""
 
 
 def model_config_kwargs(config: ModelConfig) -> dict[str, Any]:
