@@ -8,7 +8,7 @@ from langchain_core.tools import BaseTool
 
 from tools.get_math_mcp_tools import MATH_MCP_TOOLS_ID, get_math_mcp_tools
 from tools.get_weather_mcp_tools import WEATHER_MCP_TOOLS_ID, get_weather_mcp_tools
-from tools.hotel_tools import HOTEL_TOOLS_ID, get_hotel_tools
+from tools.get_hotel_tools import HOTEL_TOOLS_ID, get_hotel_tools
 from tools.summarize_tool import SUMMARIZE_TOOL_ID, summarize_tool
 from tools.think_tool import THINK_TOOL_ID, think_tool
 from tools.todo_tools import READ_TODOS_TOOL_ID, read_todos

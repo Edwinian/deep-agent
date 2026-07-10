@@ -16,7 +16,7 @@ from prompts import (
 )
 from tools.get_math_mcp_tools import MATH_MCP_TOOLS_ID
 from tools.get_weather_mcp_tools import WEATHER_MCP_TOOLS_ID
-from tools.hotel_tools import HOTEL_TOOLS_ID
+from tools.get_hotel_tools import HOTEL_TOOLS_ID
 from tools.think_tool import THINK_TOOL_ID
 from tools.web_search_tool import WEB_SEARCH_TOOL_ID
 

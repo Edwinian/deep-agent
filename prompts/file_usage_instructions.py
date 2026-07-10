@@ -2,6 +2,9 @@
 
 FILE_USAGE_INSTRUCTIONS = """You have access to a virtual file system to help you retain and save context.
 
+Paths are virtual (e.g. ``/user_request.txt``). When Daytona sandboxes are enabled,
+the backend maps them to a per-thread workspace inside the sandbox automatically.
+
 ## Workflow Process
 Always follow these steps in order for every request:
 1. **Orient**: Use ls() to see existing files before starting work

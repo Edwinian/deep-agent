@@ -12,7 +12,7 @@ from agents.ids import GENERAL_AGENT_ID
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_MESSAGE = (
-    "Search hotels for me from database. "
+    "Search hotels for me from database located in Zurich"
 )
 
 
