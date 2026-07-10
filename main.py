@@ -17,7 +17,7 @@ from schemas.invoke_response import InvokeResponse
 from schemas.thread_teardown_response import ThreadTeardownResponse
 from stream_service import StreamService
 from db.agent_store import init_agent_db
-from tools.mcp_auth import parse_authorization_header
+from mcp_interceptors.mcp_auth import parse_authorization_header
 from utils.get_checkpointer import close_sqlite_checkpointer, init_sqlite_checkpointer
 
 

@@ -28,7 +28,7 @@ from typing_extensions import Annotated, Literal
 
 from deepagents.backends.utils import create_file_data
 from schemas.content_type import CONTENT_TYPE_KEY, ContentType
-from tools.summarize_tool import Summary, summarize_content
+from tools.summarize.summarize_tool import Summary, summarize_content
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ def _text_tool_message(
         kwargs["status"] = status
     return ToolMessage(content, **kwargs)
 
-_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 load_dotenv(_ENV_PATH, override=True)
 
 _tavily_client: TavilyClient | None = None

@@ -21,7 +21,7 @@ from schemas.invoke_response import (
     SerializedMessage,
 )
 from schemas.thread_teardown_response import ThreadTeardownResponse
-from tools.mcp_auth import mcp_access_token_context
+from mcp_interceptors.mcp_auth import mcp_access_token_context
 from utils.compile_agent import compile_agent
 from utils.daytona_sandbox import delete_daytona_sandbox, sync_skills_for_thread
 from utils.get_checkpointer import delete_thread_checkpoints

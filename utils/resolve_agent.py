@@ -5,7 +5,7 @@ from __future__ import annotations
 from db.agent_store import AgentNotFoundError, get_agent, get_skills, get_system_prompt
 from agents.types import DeepAgent
 from tools.tool_registry import resolve_tools
-from tools.web_search_tool import get_today_str
+from tools.web_search.web_search_tool import get_today_str
 from utils.daytona_sandbox import load_skills
 
 

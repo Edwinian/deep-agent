@@ -14,11 +14,11 @@ from prompts import (
     SUBAGENT_USAGE_INSTRUCTIONS,
     TODO_USAGE_INSTRUCTIONS,
 )
-from tools.get_math_mcp_tools import MATH_MCP_TOOLS_ID
-from tools.get_weather_mcp_tools import WEATHER_MCP_TOOLS_ID
-from tools.get_hotel_tools import HOTEL_TOOLS_ID
-from tools.think_tool import THINK_TOOL_ID
-from tools.web_search_tool import WEB_SEARCH_TOOL_ID
+from tools.hotel.get_hotel_tools import HOTEL_TOOLS_ID
+from tools.math.get_math_mcp_tools import MATH_MCP_TOOLS_ID
+from tools.think.think_tool import THINK_TOOL_ID
+from tools.weather.get_weather_mcp_tools import WEATHER_MCP_TOOLS_ID
+from tools.web_search.web_search_tool import WEB_SEARCH_TOOL_ID
 
 DEFAULT_MODEL = ModelName.GROK_4_3.with_provider()
 MAX_CONCURRENT_RESEARCH_UNITS = 3
@@ -57,10 +57,10 @@ def seed_default_agents(conn: sqlite3.Connection) -> None:
     now = datetime.now(timezone.utc).isoformat()
 
     conn.executemany(
-        "INSERT INTO SystemPrompt (id, content, created_at) VALUES (?, ?, ?)",
+        "INSERT INTO SystemPrompt (id, name, content, created_at) VALUES (?, ?, ?, ?)",
         [
-            (RESEARCH_SYSTEM_PROMPT_ID, research_prompt, now),
-            (GENERAL_SYSTEM_PROMPT_ID, general_prompt, now),
+            (RESEARCH_SYSTEM_PROMPT_ID, "research-agent", research_prompt, now),
+            (GENERAL_SYSTEM_PROMPT_ID, "general-agent", general_prompt, now),
         ],
     )
 

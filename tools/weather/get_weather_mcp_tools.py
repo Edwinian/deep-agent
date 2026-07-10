@@ -8,7 +8,7 @@ from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 
-from tools.mcp_auth import MCP_AUTH_INTERCEPTOR, authorization_headers
+from mcp_interceptors.mcp_auth import MCP_AUTH_INTERCEPTOR, authorization_headers
 
 WEATHER_MCP_TOOLS_ID = 2001
 WEATHER_MCP_URL = os.getenv("WEATHER_MCP_URL", "http://127.0.0.1:8001/mcp")
@@ -20,7 +20,7 @@ async def get_weather_mcp_tools(token: str | None = None) -> list[BaseTool]:
     Args:
         token: Optional access token sent as ``Authorization: Bearer`` on MCP
             HTTP requests. Per-invoke tokens are also read from
-            ``tools.mcp_auth.mcp_access_token`` when agents are cached.
+            ``mcp_interceptors.mcp_auth.mcp_access_token`` when agents are cached.
     """
     connection: StreamableHttpConnection = {
         "transport": "streamable_http",

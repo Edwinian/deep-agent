@@ -79,7 +79,7 @@ def _print_header(title: str) -> None:
 
 def _load_web_search_module():
     """Import web_search_tool without triggering tools/__init__ circular imports."""
-    path = Path(__file__).resolve().parent / "tools" / "web_search_tool.py"
+    path = Path(__file__).resolve().parent / "tools" / "web_search" / "web_search_tool.py"
     spec = importlib.util.spec_from_file_location("web_search_tool", path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load module from {path}")

@@ -33,6 +33,7 @@ class BaseRow:
 
 @dataclass(frozen=True)
 class SystemPromptRow(BaseRow):
+    name: str
     content: str
 
 
@@ -275,6 +276,44 @@ def _migrate_skill_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE Agent ADD COLUMN skill_ids TEXT")
 
 
+def _migrate_system_prompt_name(conn: sqlite3.Connection) -> None:
+    """Add name to SystemPrompt for existing databases."""
+    columns = _table_columns(conn, "SystemPrompt")
+    if "name" not in columns:
+        conn.execute("ALTER TABLE SystemPrompt ADD COLUMN name TEXT")
+        conn.execute(
+            """
+            UPDATE SystemPrompt
+            SET name = CASE
+                WHEN id = 1 THEN 'research-agent'
+                WHEN id = 2 THEN 'general-agent'
+                ELSE 'system-prompt-' || id
+            END
+            WHERE name IS NULL
+            """
+        )
+
+
+def _migrate_system_prompt_default_names(conn: sqlite3.Connection) -> None:
+    """Rename legacy default SystemPrompt names to agent-aligned values."""
+    conn.execute(
+        """
+        UPDATE SystemPrompt
+        SET name = 'research-agent'
+        WHERE id = 1
+          AND name IN ('system-prompt-1', 'research-system-prompt')
+        """
+    )
+    conn.execute(
+        """
+        UPDATE SystemPrompt
+        SET name = 'general-agent'
+        WHERE id = 2
+          AND name IN ('system-prompt-2', 'general-system-prompt')
+        """
+    )
+
+
 def init_agent_db(conn_string: str | None = None) -> None:
     """Create agent tables and seed defaults when empty."""
     conn = _connect(conn_string)
@@ -283,6 +322,7 @@ def init_agent_db(conn_string: str | None = None) -> None:
             """
             CREATE TABLE IF NOT EXISTS SystemPrompt (
                 id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
                 content TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT,
@@ -318,6 +358,8 @@ def init_agent_db(conn_string: str | None = None) -> None:
         _migrate_timestamp_columns(conn)
         _migrate_agent_table(conn)
         _migrate_skill_schema(conn)
+        _migrate_system_prompt_name(conn)
+        _migrate_system_prompt_default_names(conn)
         conn.commit()
 
         count = conn.execute("SELECT COUNT(*) FROM Agent").fetchone()[0]
@@ -340,7 +382,7 @@ def get_system_prompt(
     try:
         row = conn.execute(
             """
-            SELECT id, content, created_at, updated_at, deleted_at
+            SELECT id, name, content, created_at, updated_at, deleted_at
             FROM SystemPrompt
             WHERE id = ?
             """,
@@ -350,6 +392,7 @@ def get_system_prompt(
             raise AgentNotFoundError(f"Unknown system_prompt_id: {prompt_id}")
         return SystemPromptRow(
             **_base_row_fields(row),
+            name=str(row["name"]),
             content=str(row["content"]),
         )
     finally:

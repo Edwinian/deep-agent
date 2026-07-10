@@ -9,7 +9,7 @@ import sys
 import httpx
 
 from agents.ids import GENERAL_AGENT_ID
-from tools.mcp_auth import authorization_headers
+from mcp_interceptors.mcp_auth import authorization_headers
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_MESSAGE = (

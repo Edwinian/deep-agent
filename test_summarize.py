@@ -37,7 +37,7 @@ def _check_xai_key() -> None:
 
 def _load_summarize_module():
     """Import summarize_tool without triggering tools/__init__ circular imports."""
-    path = Path(__file__).resolve().parent / "tools" / "summarize_tool.py"
+    path = Path(__file__).resolve().parent / "tools" / "summarize" / "summarize_tool.py"
     spec = importlib.util.spec_from_file_location("summarize_tool", path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load module from {path}")

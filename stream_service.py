@@ -24,7 +24,7 @@ from schemas.invoke_response import (
     StreamTextChunk,
 )
 from schemas.content_type import CONTENT_TYPE_KEY
-from tools.mcp_auth import mcp_access_token_context
+from mcp_interceptors.mcp_auth import mcp_access_token_context
 from utils.daytona_sandbox import sync_skills_for_thread
 from utils.hitl import collect_action_requests
 from utils.langfuse_tracing import with_langfuse_config
