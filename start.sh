@@ -55,7 +55,7 @@ trap cleanup EXIT INT TERM
 "$PYTHON" mcp_servers/init_hotels_db.py
 
 free_port "$TOOLBOX_PORT"
-toolbox --config "$ROOT/mcp_servers/tools.yaml" --port "$TOOLBOX_PORT" &
+toolbox --config "$ROOT/mcp_servers/mcp_toolbox.yaml" --port "$TOOLBOX_PORT" &
 TOOLBOX_PID=$!
 
 for _ in {1..30}; do
