@@ -206,7 +206,7 @@ def test_tool_node_with_filedata(
             }
         ],
     )
-    # Mimics state after write_file in general-agent before research subagent runs.
+    # Mimics state after write_file in general_agent before research subagent runs.
     state: State = {
         "messages": [ai],
         "files": {"/user_request.txt": create_file_data("prior agent file")},

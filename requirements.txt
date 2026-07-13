@@ -18,6 +18,7 @@ langgraph-checkpoint-sqlite>=3.0.3
 langgraph-checkpoint-postgres>=3.0.5
 psycopg[binary]>=3.3.4
 langfuse
+langsmith
 langchain-daytona
 daytona>=0.102.0
 fastmcp
@@ -28,6 +29,7 @@ toolbox-langchain
 numpy>=1.26.0
 langchain-text-splitters>=0.3.0
 langchain-huggingface>=0.1.0
+sentence-transformers>=3.0.0
 langchain-chroma>=0.2.0
 chromadb>=0.5.0
 unstructured>=0.16.0

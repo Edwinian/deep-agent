@@ -7,11 +7,16 @@ import sqlite3
 from datetime import datetime, timezone
 
 from agents.ids import GENERAL_AGENT_ID, RAG_AGENT_ID, RESEARCH_AGENT_ID
+from constants.agent_name import AgentName
+from constants.function_name import FunctionName
 from constants.model_name import ModelName
 from prompts import (
     FILE_USAGE_INSTRUCTIONS,
+    GENERATE_ANSWER,
+    GRADE_DOCUMENTS,
     RAG_AGENT_INSTRUCTIONS,
     RESEARCHER_INSTRUCTIONS,
+    REWRITE_QUERY,
     SUBAGENT_USAGE_INSTRUCTIONS,
     TODO_USAGE_INSTRUCTIONS,
 )
@@ -29,6 +34,9 @@ MAX_RESEARCHER_ITERATIONS = 3
 RESEARCH_SYSTEM_PROMPT_ID = 1
 GENERAL_SYSTEM_PROMPT_ID = 2
 RAG_SYSTEM_PROMPT_ID = 3
+GENERATE_ANSWER_SYSTEM_PROMPT_ID = 4
+GRADE_DOCUMENTS_SYSTEM_PROMPT_ID = 5
+REWRITE_QUERY_SYSTEM_PROMPT_ID = 6
 
 
 def _build_general_system_prompt() -> str:
@@ -65,9 +73,12 @@ def seed_default_agents(conn: sqlite3.Connection) -> None:
     conn.executemany(
         "INSERT INTO SystemPrompt (id, name, content, created_at) VALUES (?, ?, ?, ?)",
         [
-            (RESEARCH_SYSTEM_PROMPT_ID, "research-agent", research_prompt, now),
-            (GENERAL_SYSTEM_PROMPT_ID, "general-agent", general_prompt, now),
-            (RAG_SYSTEM_PROMPT_ID, "rag-agent", rag_prompt, now),
+            (RESEARCH_SYSTEM_PROMPT_ID, AgentName.RESEARCH_AGENT, research_prompt, now),
+            (GENERAL_SYSTEM_PROMPT_ID, AgentName.GENERAL_AGENT, general_prompt, now),
+            (RAG_SYSTEM_PROMPT_ID, AgentName.RAG_AGENT, rag_prompt, now),
+            (GENERATE_ANSWER_SYSTEM_PROMPT_ID, FunctionName.GENERATE_ANSWER, GENERATE_ANSWER, now),
+            (GRADE_DOCUMENTS_SYSTEM_PROMPT_ID, FunctionName.GRADE_DOCUMENTS, GRADE_DOCUMENTS, now),
+            (REWRITE_QUERY_SYSTEM_PROMPT_ID, FunctionName.REWRITE_QUERY, REWRITE_QUERY, now),
         ],
     )
 
@@ -87,7 +98,7 @@ def seed_default_agents(conn: sqlite3.Connection) -> None:
         [
             (
                 RESEARCH_AGENT_ID,
-                "research-agent",
+                AgentName.RESEARCH_AGENT,
                 (
                     "Delegate research to the sub-agent researcher. "
                     "Only give this researcher one topic at a time."
@@ -100,7 +111,7 @@ def seed_default_agents(conn: sqlite3.Connection) -> None:
             ),
             (
                 RAG_AGENT_ID,
-                "rag-agent",
+                AgentName.RAG_AGENT,
                 (
                     "Delegate questions that need grounded answers from indexed "
                     "documents in the ChromaDB vector store. Use when the user asks "
@@ -114,7 +125,7 @@ def seed_default_agents(conn: sqlite3.Connection) -> None:
             ),
             (
                 GENERAL_AGENT_ID,
-                "general-agent",
+                AgentName.GENERAL_AGENT,
                 (
                     "Orchestrates research by managing todos, files, "
                     "and delegating to specialized agents."

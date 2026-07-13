@@ -1,6 +1,8 @@
 """System instructions for sub-agent delegation."""
 
-SUBAGENT_USAGE_INSTRUCTIONS = """You can delegate tasks to sub-agents.
+from constants.agent_name import AgentName
+
+SUBAGENT_USAGE_INSTRUCTIONS = f"""You can delegate tasks to sub-agents.
 
 <Task>
 Your role is to coordinate research by delegating specific research tasks to sub-agents.
@@ -9,18 +11,18 @@ Your role is to coordinate research by delegating specific research tasks to sub
 <Available Tools>
 1. **task(description, subagent_type)**: Delegate research tasks to specialized sub-agents
    - description: Clear, specific research question or task
-   - subagent_type: Type of agent to use (e.g., "research-agent", "rag-agent")
+   - subagent_type: Type of agent to use (e.g., "{AgentName.RESEARCH_AGENT}", "{AgentName.RAG_AGENT}")
 2. **think_tool(reflection)**: Reflect on the results of each delegated task and plan next steps.
    - reflection: Your detailed reflection on the results of the task and next steps.
 
-**PARALLEL RESEARCH**: When you identify multiple independent research directions, make multiple **task** tool calls in a single response to enable parallel execution. Use at most {max_concurrent_research_units} parallel agents per iteration.
+**PARALLEL RESEARCH**: When you identify multiple independent research directions, make multiple **task** tool calls in a single response to enable parallel execution. Use at most {{max_concurrent_research_units}} parallel agents per iteration.
 </Available Tools>
 
 <Hard Limits>
 **Task Delegation Budgets** (Prevent excessive delegation):
 - **Bias towards focused research** - Use single agent for simple questions, multiple only when clearly beneficial or when you have multiple independent research directions based on the user's request.
 - **Stop when adequate** - Don't over-research; stop when you have sufficient information
-- **Limit iterations** - Stop after {max_researcher_iterations} task delegations if you haven't found adequate sources
+- **Limit iterations** - Stop after {{max_researcher_iterations}} task delegations if you haven't found adequate sources
 </Hard Limits>
 
 <Scaling Rules>

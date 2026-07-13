@@ -10,6 +10,7 @@ from langgraph.types import Command
 from typing_extensions import Annotated
 
 from chroma_service import ChromaService
+from tools.rag.generate_answer import generate_answer
 from tools.rag.grade_documents import GradeDocuments, grade_documents
 from tools.rag.rewrite_query import rewrite_query
 from utils.tool_messages import text_tool_message
@@ -67,14 +68,14 @@ def retrieve_tool(
     """Search and return relevant passages from indexed documents.
 
     Retrieves from ChromaDB, grades relevance against the query, rewrites and
-    retries retrieval when needed, then returns the relevant context.
+    retries retrieval when needed, then generates a concise grounded answer.
 
     Args:
         query: Natural language search query.
         tool_call_id: Injected tool call identifier for message tracking.
 
     Returns:
-        Command that adds the retrieved context as a text tool message.
+        Command that adds the generated answer as a text tool message.
     """
     context, error = _retrieve_graded_context(
         query,
@@ -91,10 +92,11 @@ def retrieve_tool(
             }
         )
 
+    answer = generate_answer(query, context or "")
     return Command(
         update={
             "messages": [
-                text_tool_message(context or "", tool_call_id),
+                text_tool_message(answer, tool_call_id),
             ],
         }
     )

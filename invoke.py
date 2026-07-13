@@ -12,9 +12,7 @@ from agents.ids import GENERAL_AGENT_ID
 from mcp_interceptors.mcp_auth import authorization_headers
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
-DEFAULT_MESSAGE = (
-    "Search hotels for me from database located in Zurich"
-)
+DEFAULT_MESSAGE = "What does Lilian Weng say about types of reward hacking? Answer by looking up on vector DB."
 
 
 def invoke_agent(

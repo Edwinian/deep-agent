@@ -278,6 +278,8 @@ def _migrate_skill_schema(conn: sqlite3.Connection) -> None:
 
 def _migrate_system_prompt_name(conn: sqlite3.Connection) -> None:
     """Add name to SystemPrompt for existing databases."""
+    from constants.agent_name import AgentName
+
     columns = _table_columns(conn, "SystemPrompt")
     if "name" not in columns:
         conn.execute("ALTER TABLE SystemPrompt ADD COLUMN name TEXT")
@@ -285,40 +287,46 @@ def _migrate_system_prompt_name(conn: sqlite3.Connection) -> None:
             """
             UPDATE SystemPrompt
             SET name = CASE
-                WHEN id = 1 THEN 'research-agent'
-                WHEN id = 2 THEN 'general-agent'
+                WHEN id = 1 THEN ?
+                WHEN id = 2 THEN ?
                 ELSE 'system-prompt-' || id
             END
             WHERE name IS NULL
-            """
+            """,
+            (AgentName.RESEARCH_AGENT, AgentName.GENERAL_AGENT),
         )
 
 
 def _migrate_system_prompt_default_names(conn: sqlite3.Connection) -> None:
     """Rename legacy default SystemPrompt names to agent-aligned values."""
+    from constants.agent_name import AgentName
+
     conn.execute(
         """
         UPDATE SystemPrompt
-        SET name = 'research-agent'
+        SET name = ?
         WHERE id = 1
           AND name IN ('system-prompt-1', 'research-system-prompt')
-        """
+        """,
+        (AgentName.RESEARCH_AGENT,),
     )
     conn.execute(
         """
         UPDATE SystemPrompt
-        SET name = 'general-agent'
+        SET name = ?
         WHERE id = 2
           AND name IN ('system-prompt-2', 'general-system-prompt')
-        """
+        """,
+        (AgentName.GENERAL_AGENT,),
     )
 
 
 def _migrate_rag_agent(conn: sqlite3.Connection) -> None:
-    """Add rag-agent and attach it to general-agent for existing databases."""
+    """Add rag_agent and attach it to general_agent for existing databases."""
     from datetime import datetime, timezone
 
     from agents.ids import GENERAL_AGENT_ID, RAG_AGENT_ID
+    from constants.agent_name import AgentName
     from constants.model_name import ModelName
     from prompts.rag_agent_instructions import RAG_AGENT_INSTRUCTIONS
 
@@ -327,7 +335,7 @@ def _migrate_rag_agent(conn: sqlite3.Connection) -> None:
 
     existing = conn.execute(
         "SELECT id FROM Agent WHERE id = ? OR name = ?",
-        (RAG_AGENT_ID, "rag-agent"),
+        (RAG_AGENT_ID, AgentName.RAG_AGENT),
     ).fetchone()
     if existing is None:
         now = datetime.now(timezone.utc).isoformat()
@@ -342,7 +350,7 @@ def _migrate_rag_agent(conn: sqlite3.Connection) -> None:
                 name = excluded.name,
                 content = excluded.content
             """,
-            (RAG_SYSTEM_PROMPT_ID, "rag-agent", rag_prompt, now),
+            (RAG_SYSTEM_PROMPT_ID, AgentName.RAG_AGENT, rag_prompt, now),
         )
         conn.execute(
             """
@@ -359,7 +367,7 @@ def _migrate_rag_agent(conn: sqlite3.Connection) -> None:
             """,
             (
                 RAG_AGENT_ID,
-                "rag-agent",
+                AgentName.RAG_AGENT,
                 (
                     "Delegate questions that need grounded answers from indexed "
                     "documents in the ChromaDB vector store. Use when the user asks "
@@ -389,6 +397,99 @@ def _migrate_rag_agent(conn: sqlite3.Connection) -> None:
         conn.execute(
             "UPDATE Agent SET subagent_ids = ? WHERE id = ?",
             (json.dumps(subagent_ids), GENERAL_AGENT_ID),
+        )
+
+
+def _migrate_agent_names(conn: sqlite3.Connection) -> None:
+    """Rename legacy kebab-case agent and system-prompt names to snake_case."""
+    from constants.agent_name import AgentName
+
+    legacy_names = {
+        "research-agent": AgentName.RESEARCH_AGENT,
+        "general-agent": AgentName.GENERAL_AGENT,
+        "rag-agent": AgentName.RAG_AGENT,
+    }
+    for old_name, new_name in legacy_names.items():
+        conn.execute(
+            "UPDATE SystemPrompt SET name = ? WHERE name = ?",
+            (new_name, old_name),
+        )
+        conn.execute(
+            "UPDATE Agent SET name = ? WHERE name = ?",
+            (new_name, old_name),
+        )
+
+
+def _migrate_function_prompt_names(conn: sqlite3.Connection) -> None:
+    """Rename legacy kebab-case RAG function prompt names to snake_case."""
+    from constants.function_name import FunctionName
+
+    legacy_names = {
+        "generate-answer": FunctionName.GENERATE_ANSWER,
+        "grade-documents": FunctionName.GRADE_DOCUMENTS,
+        "rewrite-query": FunctionName.REWRITE_QUERY,
+    }
+    for old_name, new_name in legacy_names.items():
+        conn.execute(
+            "UPDATE SystemPrompt SET name = ? WHERE name = ?",
+            (new_name, old_name),
+        )
+
+
+def _migrate_generate_answer_prompt(conn: sqlite3.Connection) -> None:
+    """Add generate_answer system prompt for existing databases."""
+    from datetime import datetime, timezone
+
+    from constants.function_name import FunctionName
+    from prompts.generate_answer import GENERATE_ANSWER
+
+    GENERATE_ANSWER_SYSTEM_PROMPT_ID = 4
+
+    existing = conn.execute(
+        "SELECT id FROM SystemPrompt WHERE id = ? OR name = ?",
+        (GENERATE_ANSWER_SYSTEM_PROMPT_ID, FunctionName.GENERATE_ANSWER),
+    ).fetchone()
+    if existing is not None:
+        return
+
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO SystemPrompt (id, name, content, created_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (GENERATE_ANSWER_SYSTEM_PROMPT_ID, FunctionName.GENERATE_ANSWER, GENERATE_ANSWER, now),
+    )
+
+
+def _migrate_rag_tool_prompts(conn: sqlite3.Connection) -> None:
+    """Add RAG tool system prompts for existing databases."""
+    from datetime import datetime, timezone
+
+    from constants.function_name import FunctionName
+    from prompts.generate_answer import GENERATE_ANSWER
+    from prompts.grade_documents import GRADE_DOCUMENTS
+    from prompts.rewrite_query import REWRITE_QUERY
+
+    prompts = (
+        (4, FunctionName.GENERATE_ANSWER, GENERATE_ANSWER),
+        (5, FunctionName.GRADE_DOCUMENTS, GRADE_DOCUMENTS),
+        (6, FunctionName.REWRITE_QUERY, REWRITE_QUERY),
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    for prompt_id, name, content in prompts:
+        existing = conn.execute(
+            "SELECT id FROM SystemPrompt WHERE id = ? OR name = ?",
+            (prompt_id, name),
+        ).fetchone()
+        if existing is not None:
+            continue
+        conn.execute(
+            """
+            INSERT INTO SystemPrompt (id, name, content, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (prompt_id, name, content, now),
         )
 
 
@@ -438,7 +539,11 @@ def init_agent_db(conn_string: str | None = None) -> None:
         _migrate_skill_schema(conn)
         _migrate_system_prompt_name(conn)
         _migrate_system_prompt_default_names(conn)
+        _migrate_agent_names(conn)
         _migrate_rag_agent(conn)
+        _migrate_function_prompt_names(conn)
+        _migrate_generate_answer_prompt(conn)
+        _migrate_rag_tool_prompts(conn)
         conn.commit()
 
         count = conn.execute("SELECT COUNT(*) FROM Agent").fetchone()[0]
@@ -469,6 +574,33 @@ def get_system_prompt(
         ).fetchone()
         if row is None:
             raise AgentNotFoundError(f"Unknown system_prompt_id: {prompt_id}")
+        return SystemPromptRow(
+            **_base_row_fields(row),
+            name=str(row["name"]),
+            content=str(row["content"]),
+        )
+    finally:
+        conn.close()
+
+
+def get_system_prompt_by_name(
+    name: str,
+    *,
+    conn_string: str | None = None,
+) -> SystemPromptRow:
+    """Load a system prompt row by name."""
+    conn = _connect(conn_string)
+    try:
+        row = conn.execute(
+            """
+            SELECT id, name, content, created_at, updated_at, deleted_at
+            FROM SystemPrompt
+            WHERE name = ?
+            """,
+            (str(name),),
+        ).fetchone()
+        if row is None:
+            raise AgentNotFoundError(f"Unknown system prompt name: {name}")
         return SystemPromptRow(
             **_base_row_fields(row),
             name=str(row["name"]),

@@ -26,7 +26,7 @@ from tavily.errors import (
 from typing_extensions import Annotated, Literal
 
 from deepagents.backends.utils import create_file_data
-from tools.summarize.summarize_tool import Summary, summarize_content
+from utils.summarize import Summary, summarize
 from utils.tool_messages import text_tool_message
 
 logger = logging.getLogger(__name__)
@@ -161,9 +161,9 @@ def _filename_from_title(title: str) -> str:
 
 
 def summarize_webpage_content(webpage_content: str, *, title: str = "") -> Summary:
-    """Summarize webpage content using summarize_tool."""
+    """Summarize webpage content using summarize."""
     try:
-        result = summarize_content(webpage_content)
+        result = summarize(webpage_content)
         return Summary(
             filename=_normalize_virtual_path(result.filename),
             summary=result.summary,

@@ -189,7 +189,11 @@ class ChromaService:
         response = requests.get(url, timeout=self.WEB_PAGE_TIMEOUT_SECONDS)
         response.raise_for_status()
         soup = bs4.BeautifulSoup(response.text, "html.parser", **(bs_kwargs or {}))
-        return [Document(page_content=soup.get_text(), metadata={"source": url})]
+        for element in soup(["script", "style", "nav", "header", "footer"]):
+            element.decompose()
+        content_root = soup.find("article") or soup.find("main") or soup.body or soup
+        text = content_root.get_text(separator="\n", strip=True)
+        return [Document(page_content=text, metadata={"source": url})]
 
     def get_doc_splits_from_web(
         self,
@@ -215,50 +219,8 @@ class ChromaService:
             logger.error(f"Failed to load or split web documents from {urls}: {str(e)}")
             raise ValueError(f"Failed to load or split web documents: {str(e)}") from e
 
-    def get_valid_splits(
-        self, splits: List[Document]
-    ) -> tuple[List[Document], list[str]]:
+    def get_valid_splits(self, splits: List[Document]) -> List[Document]:
         valid_splits = []
-        pii_content = []
-        presidio_patterns = {
-            # Personal Identifiers
-            "PERSON": r"\b([A-Z][a-z]+(?: [A-Z][a-z]+){1,3})\b",  # Names (simple pattern)
-            "US_SSN": r"\b\d{3}-\d{2}-\d{4}\b",
-            "NRIC": r"\b[STFG]\d{7}[A-Z]\b",  # Singapore ID
-            "PASSPORT": r"\b[A-Z]{1,2}\d{6,9}\b",
-            # Contact Information
-            "EMAIL": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",
-            "PHONE": r"\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b",
-            "IP_ADDRESS": r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
-            # Financial
-            "CREDIT_CARD": r"\b(?:\d[ -]*?){13,16}\b",
-            "SWIFT_CODE": r"\b[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b",
-            # Medical
-            "MEDICAL_LICENSE": r"\b[A-Z]{2,3}\d{5,8}\b",
-            # Location (simple patterns)
-            "ADDRESS": r"\b\d{1,5} [A-Za-z]+(?: [A-Za-z]+){1,3},? [A-Z]{2} \d{5}\b",
-            "COORDINATES": r"\b-?\d{1,3}\.\d{4,}, -?\d{1,3}\.\d{4,}\b",
-        }
-        iam_smart_patterns = {
-            # Name Identifiers
-            "CHINESE_NAME": r"[\u4e00-\u9fff]{2,4}",  # 2-4 Chinese characters
-            "ENGLISH_NAME": r"\b([A-Z][a-z]+(?: [A-Z][a-z]+){1,3})\b",
-            # Government IDs
-            "HKID": r"\b[A-Z]{1,2}[0-9]{6}\([0-9A]\)\b",  # Official HKID format
-            "PASSPORT": r"\b[A-Z]{1,3}\d{6,9}\b",
-            # Contact Information
-            "PRIMARY_EMAIL": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",
-            "MOBILE_PHONE": r"\b(852)?[ -]?\d{4}[ -]?\d{4}\b",  # HK mobile format
-            # Address Information (Hong Kong specific)
-            "RESIDENTIAL_ADDRESS": r"\b(Flat|Floor|Room|Unit|Villa)[\sA-Z0-9-#]+,?\s[\w\s]+(Hong Kong|HK|H\.K\.|New Territories|NT|Kowloon|KLN)\b",
-            "POSTAL_ADDRESS": r"\b(P\.O\. Box|G\.P\.O\. Box|Post Office Box)\s\d+\b",
-            # Financial
-            "BANK_ACCOUNT": r"\b\d{10,12}\b",  # Simplified HK bank account
-        }
-        pii_patterns = {
-            **presidio_patterns,
-            **iam_smart_patterns,
-        }
 
         for split in splits:
             if split.page_content.startswith("IMAGE_CONTENT:"):
@@ -266,29 +228,6 @@ class ChromaService:
                 continue
 
             try:
-                content = split.page_content
-                redacted_content = content
-                split_pii_detected = False
-
-                # Check for PII patterns
-                for pii_type, pattern in pii_patterns.items():
-                    matches = re.finditer(pattern, content, re.IGNORECASE)
-
-                    for match in matches:
-                        split_pii_detected = True
-                        redacted_content = redacted_content.replace(
-                            match.group(), f"[REDACTED_{pii_type.upper()}]"
-                        )
-
-                # Update the content if PII was found
-                if split_pii_detected:
-                    split.page_content = redacted_content
-                    pii_content.append(redacted_content)
-                    logger.info(
-                        f"PII detected and redacted in document split: {content[:100]}..."
-                    )
-
-                # Basic validation checks
                 len_check = split.page_content.strip() and len(split.page_content) >= 5
                 embedding = self.embedding_function.embed_query(split.page_content)
 
@@ -299,23 +238,20 @@ class ChromaService:
                 logger.error(f"Failed to process split: {str(e)}")
                 continue
 
-        return valid_splits, pii_content
+        return valid_splits
 
     def index_document(self, file_path: str, file_id: int) -> dict[str, str]:
         try:
             splits = self.get_doc_splits_from_file(file_path)
-            valid_splits, pii_content = self.get_valid_splits(splits)
+            valid_splits = self.get_valid_splits(splits)
             response = {
                 "success": "0",
                 "error": "",
-                "pii_content": "".join(pii_content),
             }
 
             if not valid_splits:
                 response["error"] = "No valid document splits found."
                 return response
-
-            pii_detected = len(pii_content) > 0
 
             for split in valid_splits:
                 split.metadata["file_id"] = file_id
@@ -323,8 +259,6 @@ class ChromaService:
                     k: str(v) if v is not None else ""
                     for k, v in split.metadata.items()
                 }
-                # Add PII detection flag to metadata
-                split.metadata["pii_detected"] = str(pii_detected)
 
             if valid_splits:
                 filtered_splits = filter_complex_metadata(valid_splits)
@@ -338,6 +272,53 @@ class ChromaService:
                 status_code=500,
                 detail=f"Failed to index {os.path.basename(file_path)}: {str(e)}",
             )
+
+    def index_web_documents(
+        self,
+        urls: list[str],
+        *,
+        bs_kwargs: dict | None = None,
+    ) -> dict[str, str]:
+        try:
+            splits = self.get_doc_splits_from_web(urls, bs_kwargs=bs_kwargs)
+            valid_splits = self.get_valid_splits(splits)
+            response = {
+                "success": "0",
+                "error": "",
+            }
+
+            if not valid_splits:
+                response["error"] = "No valid document splits found."
+                return response
+
+            for split in valid_splits:
+                split.metadata = {
+                    k: str(v) if v is not None else ""
+                    for k, v in split.metadata.items()
+                }
+                split.metadata["document_type"] = "web"
+
+            filtered_splits = filter_complex_metadata(valid_splits)
+            self.vectorstore.add_documents(filtered_splits)
+            response["success"] = "1"
+            return response
+        except ValueError as e:
+            logger.error(f"Error indexing web documents from {urls}: {str(e)}")
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            logger.error(f"Error indexing web documents from {urls}: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to index web documents: {str(e)}",
+            )
+
+    def delete_web_documents(self) -> bool:
+        try:
+            self.vectorstore._collection.delete(where={"document_type": "web"})
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting web documents: {str(e)}")
+            return False
 
     def delete_document(self, file_id: int) -> bool:
         try:

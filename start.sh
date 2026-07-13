@@ -26,6 +26,7 @@ fi
 
 TOOLBOX_PORT="${TOOLBOX_PORT:-5000}"
 TOOLBOX_URL="${TOOLBOX_URL:-http://127.0.0.1:${TOOLBOX_PORT}}"
+APP_PORT="${APP_PORT:-8000}"
 export TOOLBOX_URL
 export TOOLBOX_SQLITE_PATH="${TOOLBOX_SQLITE_PATH:-$ROOT/data/toolbox_hotels.db}"
 
@@ -55,7 +56,13 @@ trap cleanup EXIT INT TERM
 "$PYTHON" mcp_servers/init_hotels_db.py
 
 free_port "$TOOLBOX_PORT"
-toolbox --config "$ROOT/mcp_servers/mcp_toolbox.yaml" --port "$TOOLBOX_PORT" &
+toolbox --config "$ROOT/mcp_servers/mcp_toolbox.yaml" --port "$TOOLBOX_PORT" \
+  --allowed-hosts "127.0.0.1:${TOOLBOX_PORT}" \
+  --allowed-hosts "localhost:${TOOLBOX_PORT}" \
+  --allowed-origins "http://127.0.0.1:${TOOLBOX_PORT}" \
+  --allowed-origins "http://localhost:${TOOLBOX_PORT}" \
+  --allowed-origins "http://127.0.0.1:${APP_PORT}" \
+  --allowed-origins "http://localhost:${APP_PORT}" &
 TOOLBOX_PID=$!
 
 for _ in {1..30}; do
