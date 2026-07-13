@@ -8,6 +8,7 @@ from prompts.read_file_description import READ_FILE_DESCRIPTION
 from prompts.researcher_instructions import (
     RESEARCHER_INSTRUCTIONS,
 )
+from prompts.rag_agent_instructions import RAG_AGENT_INSTRUCTIONS
 from prompts.subagent_usage_instructions import (
     SUBAGENT_USAGE_INSTRUCTIONS,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "LS_DESCRIPTION",
     "READ_FILE_DESCRIPTION",
     "RESEARCHER_INSTRUCTIONS",
+    "RAG_AGENT_INSTRUCTIONS",
     "SUBAGENT_USAGE_INSTRUCTIONS",
     "SUMMARIZE",
     "TASK_DESCRIPTION_PREFIX",

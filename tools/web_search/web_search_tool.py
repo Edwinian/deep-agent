@@ -11,7 +11,6 @@ from typing import Any
 
 import httpx
 from dotenv import load_dotenv
-from langchain_core.messages import ToolMessage
 from langchain_core.tools import InjectedToolArg, InjectedToolCallId, tool
 from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
@@ -27,28 +26,12 @@ from tavily.errors import (
 from typing_extensions import Annotated, Literal
 
 from deepagents.backends.utils import create_file_data
-from schemas.content_type import CONTENT_TYPE_KEY, ContentType
 from tools.summarize.summarize_tool import Summary, summarize_content
+from utils.tool_messages import text_tool_message
 
 logger = logging.getLogger(__name__)
 
 WEB_SEARCH_TOOL_ID = 2006
-
-
-def _text_tool_message(
-    content: str,
-    tool_call_id: str,
-    *,
-    status: Literal["success", "error"] | None = None,
-) -> ToolMessage:
-    """Build a text ToolMessage tagged for client stream rendering."""
-    kwargs: dict[str, Any] = {
-        "tool_call_id": tool_call_id,
-        "additional_kwargs": {CONTENT_TYPE_KEY: ContentType.TEXT},
-    }
-    if status is not None:
-        kwargs["status"] = status
-    return ToolMessage(content, **kwargs)
 
 _ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 load_dotenv(_ENV_PATH, override=True)
@@ -313,7 +296,7 @@ def web_search_tool(
         return Command(
             update={
                 "messages": [
-                    _text_tool_message(
+                    text_tool_message(
                         error_text,
                         tool_call_id,
                         status="error",
@@ -326,7 +309,7 @@ def web_search_tool(
         return Command(
             update={
                 "messages": [
-                    _text_tool_message(
+                    text_tool_message(
                         f"No search results returned for '{query}'. Try a different query.",
                         tool_call_id,
                         status="error",
@@ -372,7 +355,7 @@ Files: {', '.join(saved_files)}
         update={
             "files": files,
             "messages": [
-                _text_tool_message(summary_text, tool_call_id),
+                text_tool_message(summary_text, tool_call_id),
             ],
         }
     )

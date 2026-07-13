@@ -8,6 +8,7 @@ from langchain_core.tools import BaseTool
 
 from tools.hotel.get_hotel_tools import HOTEL_TOOLS_ID, get_hotel_tools
 from tools.math.get_math_mcp_tools import MATH_MCP_TOOLS_ID, get_math_mcp_tools
+from tools.rag.retrieve_tool import RETRIEVE_TOOL_ID, retrieve_tool
 from tools.summarize.summarize_tool import SUMMARIZE_TOOL_ID, summarize_tool
 from tools.think.think_tool import THINK_TOOL_ID, think_tool
 from tools.todo.todo_tools import READ_TODOS_TOOL_ID, read_todos
@@ -35,6 +36,7 @@ TOOL_REGISTRY: dict[int, ToolLoader] = {
     READ_TODOS_TOOL_ID: _static_tool_loader(read_todos),
     SUMMARIZE_TOOL_ID: _static_tool_loader(summarize_tool),
     WEB_SEARCH_TOOL_ID: _static_tool_loader(web_search_tool),
+    RETRIEVE_TOOL_ID: _static_tool_loader(retrieve_tool),
 }
 
 

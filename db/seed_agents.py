@@ -6,16 +6,18 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-from agents.ids import GENERAL_AGENT_ID, RESEARCH_AGENT_ID
+from agents.ids import GENERAL_AGENT_ID, RAG_AGENT_ID, RESEARCH_AGENT_ID
 from constants.model_name import ModelName
 from prompts import (
     FILE_USAGE_INSTRUCTIONS,
+    RAG_AGENT_INSTRUCTIONS,
     RESEARCHER_INSTRUCTIONS,
     SUBAGENT_USAGE_INSTRUCTIONS,
     TODO_USAGE_INSTRUCTIONS,
 )
 from tools.hotel.get_hotel_tools import HOTEL_TOOLS_ID
 from tools.math.get_math_mcp_tools import MATH_MCP_TOOLS_ID
+from tools.rag.retrieve_tool import RETRIEVE_TOOL_ID
 from tools.think.think_tool import THINK_TOOL_ID
 from tools.weather.get_weather_mcp_tools import WEATHER_MCP_TOOLS_ID
 from tools.web_search.web_search_tool import WEB_SEARCH_TOOL_ID
@@ -26,6 +28,7 @@ MAX_RESEARCHER_ITERATIONS = 3
 
 RESEARCH_SYSTEM_PROMPT_ID = 1
 GENERAL_SYSTEM_PROMPT_ID = 2
+RAG_SYSTEM_PROMPT_ID = 3
 
 
 def _build_general_system_prompt() -> str:
@@ -54,6 +57,9 @@ def seed_default_agents(conn: sqlite3.Connection) -> None:
     """Insert default research and general agent configuration."""
     research_prompt = RESEARCHER_INSTRUCTIONS
     general_prompt = _build_general_system_prompt()
+    rag_prompt = RAG_AGENT_INSTRUCTIONS.format(
+        date=datetime.now().strftime("%a %b %-d, %Y"),
+    )
     now = datetime.now(timezone.utc).isoformat()
 
     conn.executemany(
@@ -61,6 +67,7 @@ def seed_default_agents(conn: sqlite3.Connection) -> None:
         [
             (RESEARCH_SYSTEM_PROMPT_ID, "research-agent", research_prompt, now),
             (GENERAL_SYSTEM_PROMPT_ID, "general-agent", general_prompt, now),
+            (RAG_SYSTEM_PROMPT_ID, "rag-agent", rag_prompt, now),
         ],
     )
 
@@ -92,6 +99,20 @@ def seed_default_agents(conn: sqlite3.Connection) -> None:
                 now,
             ),
             (
+                RAG_AGENT_ID,
+                "rag-agent",
+                (
+                    "Delegate questions that need grounded answers from indexed "
+                    "documents in the ChromaDB vector store. Use when the user asks "
+                    "about content that may already be indexed rather than live web data."
+                ),
+                RAG_SYSTEM_PROMPT_ID,
+                None,
+                DEFAULT_MODEL,
+                json.dumps([RETRIEVE_TOOL_ID]),
+                now,
+            ),
+            (
                 GENERAL_AGENT_ID,
                 "general-agent",
                 (
@@ -99,7 +120,7 @@ def seed_default_agents(conn: sqlite3.Connection) -> None:
                     "and delegating to specialized agents."
                 ),
                 GENERAL_SYSTEM_PROMPT_ID,
-                json.dumps([RESEARCH_AGENT_ID]),
+                json.dumps([RESEARCH_AGENT_ID, RAG_AGENT_ID]),
                 DEFAULT_MODEL,
                 json.dumps([WEATHER_MCP_TOOLS_ID, MATH_MCP_TOOLS_ID, HOTEL_TOOLS_ID]),
                 now,

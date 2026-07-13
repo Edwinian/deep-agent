@@ -25,20 +25,10 @@ from constants.model_name import ModelName
 logging.basicConfig(filename="app.log", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-WEB_PAGE_TIMEOUT_SECONDS = 20
-
-
-def load_web_page(url: str, bs_kwargs: dict | None = None) -> list[Document]:
-    """Fetch a URL and return its visible text as a LangChain document."""
-    response = requests.get(url, timeout=WEB_PAGE_TIMEOUT_SECONDS)
-    response.raise_for_status()
-    soup = bs4.BeautifulSoup(response.text, "html.parser", **(bs_kwargs or {}))
-    return [Document(page_content=soup.get_text(), metadata={"source": url})]
-
 
 class ChromaService:
-    DEFAULT_COLLECTION_NAME = "default_collection"
     PERSIST_DIRECTORY = "./chroma_db"
+    WEB_PAGE_TIMEOUT_SECONDS = 20
     IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png"]
     FILE_EXTENSIONS = [
         ".pdf",
@@ -71,7 +61,7 @@ class ChromaService:
             ],
         )
 
-        self.collection_name = collection_name or self.DEFAULT_COLLECTION_NAME
+        self.collection_name = collection_name or os.getenv("CHROMA_COLLECTION_NAME")
         self.vectorstore = Chroma(
             collection_name=self.format_collection_name(self.collection_name),
             persist_directory=self.PERSIST_DIRECTORY,
@@ -141,7 +131,7 @@ class ChromaService:
 
         return formatted_name
 
-    def get_documents_from_file(self, file_path: str) -> List[Document]:
+    def get_doc_splits_from_file(self, file_path: str) -> List[Document]:
         file_extension = os.path.splitext(file_path)[1].lower()
         file_loader_map = {
             ".pdf": UnstructuredPDFLoader,
@@ -194,7 +184,14 @@ class ChromaService:
             logger.error(f"Failed to load or split document {file_path}: {str(e)}")
             raise ValueError(f"Failed to load or split document {file_path}: {str(e)}")
 
-    def get_documents_from_web(
+    def load_web_page(self, url: str, bs_kwargs: dict | None = None) -> list[Document]:
+        """Fetch a URL and return its visible text as a LangChain document."""
+        response = requests.get(url, timeout=self.WEB_PAGE_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        soup = bs4.BeautifulSoup(response.text, "html.parser", **(bs_kwargs or {}))
+        return [Document(page_content=soup.get_text(), metadata={"source": url})]
+
+    def get_doc_splits_from_web(
         self,
         urls: list[str],
         *,
@@ -208,7 +205,7 @@ class ChromaService:
             for url in urls:
                 if not url or not url.strip():
                     raise ValueError("URL cannot be empty or whitespace")
-                documents.extend(load_web_page(url.strip(), bs_kwargs=bs_kwargs))
+                documents.extend(self.load_web_page(url.strip(), bs_kwargs=bs_kwargs))
 
             splits = self.text_splitter.split_documents(documents)
             return splits
@@ -306,7 +303,7 @@ class ChromaService:
 
     def index_document(self, file_path: str, file_id: int) -> dict[str, str]:
         try:
-            splits = self.get_documents_from_file(file_path)
+            splits = self.get_doc_splits_from_file(file_path)
             valid_splits, pii_content = self.get_valid_splits(splits)
             response = {
                 "success": "0",

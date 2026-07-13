@@ -9,7 +9,7 @@ Your role is to coordinate research by delegating specific research tasks to sub
 <Available Tools>
 1. **task(description, subagent_type)**: Delegate research tasks to specialized sub-agents
    - description: Clear, specific research question or task
-   - subagent_type: Type of agent to use (e.g., "research-agent")
+   - subagent_type: Type of agent to use (e.g., "research-agent", "rag-agent")
 2. **think_tool(reflection)**: Reflect on the results of each delegated task and plan next steps.
    - reflection: Your detailed reflection on the results of the task and next steps.
 

@@ -1,0 +1,100 @@
+"""Retrieve indexed documents from ChromaDB."""
+
+from __future__ import annotations
+
+from functools import lru_cache
+
+from langchain_core.retrievers import BaseRetriever
+from langchain_core.tools import InjectedToolCallId, tool
+from langgraph.types import Command
+from typing_extensions import Annotated
+
+from chroma_service import ChromaService
+from tools.rag.grade_documents import GradeDocuments, grade_documents
+from tools.rag.rewrite_query import rewrite_query
+from utils.tool_messages import text_tool_message
+
+RETRIEVE_TOOL_ID = 2008
+MAX_QUERY_REWRITES = 1
+
+
+@lru_cache(maxsize=1)
+def _get_retriever() -> BaseRetriever:
+    service = ChromaService()
+    return service.get_retriever()
+
+
+def _retrieve_graded_context(
+    query: str,
+    *,
+    original_query: str,
+    rewrites_remaining: int,
+) -> tuple[str | None, str | None]:
+    """Retrieve, grade, and optionally rewrite the query before re-retrieving.
+
+    Returns:
+        A tuple of (context, error_message). Exactly one value is set.
+    """
+    retriever = _get_retriever()
+    retrieved_docs = retriever.invoke(query)
+    if not retrieved_docs:
+        return None, "No relevant documents found."
+
+    context = "\n\n".join(doc.page_content for doc in retrieved_docs)
+    grade = grade_documents(original_query, context)
+
+    if grade == GradeDocuments.REWRITE_QUERY:
+        if rewrites_remaining > 0:
+            rewritten_query = rewrite_query(query)
+            return _retrieve_graded_context(
+                rewritten_query,
+                original_query=original_query,
+                rewrites_remaining=rewrites_remaining - 1,
+            )
+        return (
+            None,
+            "Retrieved documents were not relevant to the query after rewriting it.",
+        )
+
+    return context, None
+
+
+@tool(parse_docstring=True)
+def retrieve_tool(
+    query: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
+    """Search and return relevant passages from indexed documents.
+
+    Retrieves from ChromaDB, grades relevance against the query, rewrites and
+    retries retrieval when needed, then returns the relevant context.
+
+    Args:
+        query: Natural language search query.
+        tool_call_id: Injected tool call identifier for message tracking.
+
+    Returns:
+        Command that adds the retrieved context as a text tool message.
+    """
+    context, error = _retrieve_graded_context(
+        query,
+        original_query=query,
+        rewrites_remaining=MAX_QUERY_REWRITES,
+    )
+
+    if error is not None:
+        return Command(
+            update={
+                "messages": [
+                    text_tool_message(error, tool_call_id, status="error"),
+                ],
+            }
+        )
+
+    return Command(
+        update={
+            "messages": [
+                text_tool_message(context or "", tool_call_id),
+            ],
+        }
+    )

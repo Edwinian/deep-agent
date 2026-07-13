@@ -314,6 +314,84 @@ def _migrate_system_prompt_default_names(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_rag_agent(conn: sqlite3.Connection) -> None:
+    """Add rag-agent and attach it to general-agent for existing databases."""
+    from datetime import datetime, timezone
+
+    from agents.ids import GENERAL_AGENT_ID, RAG_AGENT_ID
+    from constants.model_name import ModelName
+    from prompts.rag_agent_instructions import RAG_AGENT_INSTRUCTIONS
+
+    RAG_SYSTEM_PROMPT_ID = 3
+    RETRIEVE_TOOL_ID = 2008
+
+    existing = conn.execute(
+        "SELECT id FROM Agent WHERE id = ? OR name = ?",
+        (RAG_AGENT_ID, "rag-agent"),
+    ).fetchone()
+    if existing is None:
+        now = datetime.now(timezone.utc).isoformat()
+        rag_prompt = RAG_AGENT_INSTRUCTIONS.format(
+            date=datetime.now().strftime("%a %b %-d, %Y"),
+        )
+        conn.execute(
+            """
+            INSERT INTO SystemPrompt (id, name, content, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                content = excluded.content
+            """,
+            (RAG_SYSTEM_PROMPT_ID, "rag-agent", rag_prompt, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO Agent (
+                id,
+                name,
+                description,
+                system_prompt_id,
+                subagent_ids,
+                model,
+                tool_ids,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                RAG_AGENT_ID,
+                "rag-agent",
+                (
+                    "Delegate questions that need grounded answers from indexed "
+                    "documents in the ChromaDB vector store. Use when the user asks "
+                    "about content that may already be indexed rather than live web data."
+                ),
+                RAG_SYSTEM_PROMPT_ID,
+                None,
+                ModelName.GROK_4_3.with_provider(),
+                json.dumps([RETRIEVE_TOOL_ID]),
+                now,
+            ),
+        )
+
+    general_row = conn.execute(
+        "SELECT subagent_ids FROM Agent WHERE id = ?",
+        (GENERAL_AGENT_ID,),
+    ).fetchone()
+    if general_row is None:
+        return
+
+    subagent_ids = _parse_optional_id_list(
+        general_row["subagent_ids"],
+        field_name="subagent_ids",
+    ) or []
+    if RAG_AGENT_ID not in subagent_ids:
+        subagent_ids.append(RAG_AGENT_ID)
+        conn.execute(
+            "UPDATE Agent SET subagent_ids = ? WHERE id = ?",
+            (json.dumps(subagent_ids), GENERAL_AGENT_ID),
+        )
+
+
 def init_agent_db(conn_string: str | None = None) -> None:
     """Create agent tables and seed defaults when empty."""
     conn = _connect(conn_string)
@@ -360,6 +438,7 @@ def init_agent_db(conn_string: str | None = None) -> None:
         _migrate_skill_schema(conn)
         _migrate_system_prompt_name(conn)
         _migrate_system_prompt_default_names(conn)
+        _migrate_rag_agent(conn)
         conn.commit()
 
         count = conn.execute("SELECT COUNT(*) FROM Agent").fetchone()[0]
