@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 
 from invoke_service import InvokeService
@@ -18,6 +18,7 @@ from schemas.thread_teardown_response import ThreadTeardownResponse
 from stream_service import StreamService
 from db.agent_store import init_agent_db
 from mcp_interceptors.mcp_auth import parse_authorization_header
+from stt.assemblyai_stt import AssemblyAISTT, TranscriptionResult
 from utils.get_checkpointer import close_sqlite_checkpointer, init_sqlite_checkpointer
 
 
@@ -34,6 +35,27 @@ app = FastAPI(title="Deep Agents API", lifespan=lifespan)
 
 invoke_service = InvokeService()
 stream_service = StreamService(invoke_service)
+
+
+@app.post("/speech-to-text", response_model=TranscriptionResult)
+async def speech_to_text(
+    audio: UploadFile = File(..., description="Prerecorded audio file to transcribe"),
+) -> TranscriptionResult:
+    """Transcribe an uploaded audio file with AssemblyAI prerecorded STT."""
+    if not audio.filename:
+        raise HTTPException(status_code=400, detail="Audio filename is required")
+
+    content = await audio.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Audio file is empty")
+
+    try:
+        stt = AssemblyAISTT()
+        return stt.transcribe(content)
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.post("/invoke")
