@@ -28,7 +28,7 @@ from tools.think.think_tool import THINK_TOOL_ID
 from tools.weather.get_weather_mcp_tools import WEATHER_MCP_TOOLS_ID
 from tools.web_search.web_search_tool import WEB_SEARCH_TOOL_ID
 
-DEFAULT_MODEL = ModelName.GROK_4_3.with_provider()
+DEFAULT_MODEL = ModelName.GROK_4_FAST_NON_REASONING.with_provider()
 MAX_CONCURRENT_RESEARCH_UNITS = 3
 MAX_RESEARCHER_ITERATIONS = 3
 

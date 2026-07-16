@@ -67,6 +67,7 @@ XAI_API_KEY=your_xai_api_key_here
 # Optional
 LANGSMITH_API_KEY=your_langsmith_api_key_here
 LANGSMITH_TRACING=true
+LANGCHAIN_TRACING_V2=true
 LANGSMITH_PROJECT=deep-agents-from-scratch
 ```
 

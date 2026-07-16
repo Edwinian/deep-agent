@@ -581,6 +581,31 @@ def init_agent_db(conn_string: str | None = None) -> None:
 
             seed_default_agents(conn)
             conn.commit()
+
+        # Migrate the seeded default model for existing databases.
+        #
+        # Older versions used a reasoning-oriented Grok model which can emit
+        # incomplete tool-call arguments (e.g. `{}`), causing tool validation
+        # failures. Keep existing DBs working without manual intervention.
+        from datetime import datetime, timezone
+
+        from agents.ids import GENERAL_AGENT_ID, RAG_AGENT_ID, RESEARCH_AGENT_ID
+        from constants.model_name import ModelName
+
+        now = datetime.now(timezone.utc).isoformat()
+        target_model = ModelName.GROK_4_FAST_NON_REASONING.with_provider()
+        legacy_model = ModelName.GROK_4_3.with_provider()
+
+        conn.execute(
+            """
+            UPDATE Agent
+            SET model = ?, updated_at = ?
+            WHERE id IN (?, ?, ?)
+              AND model = ?
+            """,
+            (target_model, now, RESEARCH_AGENT_ID, GENERAL_AGENT_ID, RAG_AGENT_ID, legacy_model),
+        )
+        conn.commit()
     finally:
         conn.close()
 

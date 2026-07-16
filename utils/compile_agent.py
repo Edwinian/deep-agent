@@ -93,7 +93,7 @@ DEFAULT_PII_MIDDLEWARE = tuple(
         apply_to_output=True,
         apply_to_tool_results=True,
     )
-    for pii_type in ("email", "credit_card", "ip", "mac_address", "url")
+    for pii_type in ("email", "credit_card", "ip", "mac_address")
 ) + (RedactedPIIResponseMiddleware(), ToolCallArgsRepairMiddleware())
 
 

@@ -462,6 +462,22 @@ function splitReplyBlocks(raw: string): { text: string; reasoning: string } {
   }
 }
 
+/** True when an assistant bubble has something to show (or is still streaming). */
+function hasRenderableContent(message: ChatMessage): boolean {
+  if (message.role !== 'assistant') return true
+  if (message.streaming || message.reasoningStreaming) return true
+
+  const split = splitReplyBlocks(message.content)
+  const parsedAsBlocks = parseContentBlocks(message.content) != null
+  const reasoning = (message.reasoning || split.reasoning || '').trim()
+  const bodyText = (parsedAsBlocks ? split.text : message.content).trim()
+
+  if (bodyText) return true
+  if (reasoning) return true
+  if (message.tools?.length) return true
+  return false
+}
+
 function formatToolLabel(name: string): string {
   return name
     .split(/[_-]+/)
@@ -766,7 +782,9 @@ function MessageCard({
 export default function ChatClient() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
-  const [threadId, setThreadId] = useState<string | null>(null)
+  const [threadId, setThreadId] = useState<string | null>(() =>
+    threadIdFromLocation(),
+  )
   const [streaming, setStreaming] = useState(false)
   const [loadingHistory, setLoadingHistory] = useState(false)
   const [pendingHitl, setPendingHitl] = useState<PendingHitl | null>(null)
@@ -1090,7 +1108,20 @@ export default function ChatClient() {
       } finally {
         abortRef.current = null
         setStreaming(false)
-        updateAssistant((message) => ({ ...message, streaming: false }))
+        const assistantId = assistantIdRef.current
+        setMessages((prev) =>
+          prev
+            .map((message) =>
+              message.id === assistantId
+                ? {
+                    ...message,
+                    streaming: false,
+                    reasoningStreaming: false,
+                  }
+                : message,
+            )
+            .filter(hasRenderableContent),
+        )
       }
     },
     [handleChunk, threadId, updateAssistant],
@@ -1319,10 +1350,10 @@ export default function ChatClient() {
           </section>
         ) : (
           <div className="message-list">
-            {messages.map((message, index) => {
+            {messages.filter(hasRenderableContent).map((message, index, visible) => {
               const isLastAssistant =
                 message.role === 'assistant' &&
-                messages.slice(index + 1).every((item) => item.role !== 'assistant')
+                visible.slice(index + 1).every((item) => item.role !== 'assistant')
               return (
                 <MessageCard
                   key={message.id}

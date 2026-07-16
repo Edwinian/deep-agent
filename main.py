@@ -14,6 +14,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from db.agent_store import init_agent_db
 from modules.routers import routers
 from utils.get_checkpointer import close_sqlite_checkpointer, init_sqlite_checkpointer
+from utils.tracing import TracingMiddleware, init_tracing
+
+init_tracing()
 
 
 @asynccontextmanager
@@ -26,6 +29,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Deep Agents API", lifespan=lifespan)
+app.add_middleware(TracingMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[

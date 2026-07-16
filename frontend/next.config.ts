@@ -4,6 +4,8 @@ const apiBase = process.env.BACKEND_API_BASE_URL ?? 'http://127.0.0.1:8000'
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  // Hide the bottom-left Next.js dev indicator widget.
+  devIndicators: false,
   // Proxy API endpoints from the browser (port 5173) to the FastAPI backend
   // so the frontend and API share an origin.
   //

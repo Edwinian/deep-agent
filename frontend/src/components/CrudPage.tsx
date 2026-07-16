@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { crudCreate, crudDelete, crudGetMany, crudUpdate } from '@/api'
+import { useToastViewport } from '@/components/Toast'
 
 /* -------------------------------------------------------------------------- */
 /* Field descriptors — declarative schema for a CRUD resource                */
@@ -397,6 +398,8 @@ function CrudPageImpl<T extends HasId & Record<string, unknown>>({
   const [updateBusy, setUpdateBusy] = useState(false)
   const [deleteBusy, setDeleteBusy] = useState(false)
 
+  const { push: pushToast, viewport: toastViewport } = useToastViewport()
+
   const tableFields = useMemo(
     () => fields.filter((f) => !f.hideInTable),
     [fields],
@@ -423,9 +426,13 @@ function CrudPageImpl<T extends HasId & Record<string, unknown>>({
     setCreateBusy(true)
     setError(null)
     try {
-      await crudCreate(endpoint, payload)
+      const created = await crudCreate<T>(endpoint, payload)
       setCreateOpen(false)
       await refresh()
+      pushToast({
+        kind: 'success',
+        message: `Created ${rowName(created) || title.replace(/s$/, '')}.`,
+      })
     } catch (e) {
       setError((e as Error).message || 'Create failed')
     } finally {
@@ -439,8 +446,13 @@ function CrudPageImpl<T extends HasId & Record<string, unknown>>({
     setError(null)
     try {
       await crudUpdate(endpoint, editRow.id, payload)
+      const name = rowName(editRow)
       setEditRow(null)
       await refresh()
+      pushToast({
+        kind: 'success',
+        message: `Updated ${name || 'row'}.`,
+      })
     } catch (e) {
       setError((e as Error).message || 'Update failed')
     } finally {
@@ -453,9 +465,14 @@ function CrudPageImpl<T extends HasId & Record<string, unknown>>({
     setDeleteBusy(true)
     setError(null)
     try {
+      const name = rowName(deleteRow)
       await crudDelete(endpoint, deleteRow.id)
       setDeleteRow(null)
       await refresh()
+      pushToast({
+        kind: 'success',
+        message: `Deleted ${name || 'row'}.`,
+      })
     } catch (e) {
       setError((e as Error).message || 'Delete failed')
     } finally {
@@ -558,6 +575,8 @@ function CrudPageImpl<T extends HasId & Record<string, unknown>>({
         onCancel={() => setDeleteRow(null)}
         onConfirm={handleDelete}
       />
+
+      {toastViewport}
     </section>
   )
 }
