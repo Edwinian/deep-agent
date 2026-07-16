@@ -15,7 +15,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.stream.run_stream import AsyncGraphRunStream
 from langgraph.types import Command, Interrupt as LangGraphInterrupt
 
-from invoke_service import InvokeService
+from .invoke_service import InvokeService
 from schemas.invoke_request import InvokeAgent
 from schemas.invoke_response import (
     InvokeStatus,

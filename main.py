@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from db.agent_store import init_agent_db
-from modules import Chats
+from modules.routers import routers
 from utils.get_checkpointer import close_sqlite_checkpointer, init_sqlite_checkpointer
 
 
@@ -37,7 +37,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(Chats().router)
+[app.include_router(router) for router in routers]
 
 
 if __name__ == "__main__":

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, File, Header, HTTPException, Query, UploadFile
+from fastapi import File, Header, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 
-from invoke_service import InvokeService
+from .invoke_service import InvokeService
 from mcp_interceptors.mcp_auth import parse_authorization_header
 from schemas.invoke_request import InvokeAgent
 from schemas.invoke_response import InvokeResponse
@@ -13,10 +13,11 @@ from schemas.thread_history_response import ThreadHistoryResponse
 from schemas.thread_rewind_response import ThreadRewindResponse
 from schemas.thread_teardown_response import ThreadTeardownResponse
 from stt.assemblyai_stt import AssemblyAISTT, TranscriptionResult
-from stream_service import StreamService
+from .stream_service import StreamService
+from modules.base_controller import BaseController
 
 
-class Chats:
+class ChatsController(BaseController):
     """Owns every chat / thread endpoint, exposed via :attr:`router`.
 
     The router is mounted at ``/chats`` so every route below is served as
@@ -29,8 +30,7 @@ class Chats:
     def __init__(self) -> None:
         self.invoke_service = InvokeService()
         self.stream_service = StreamService(self.invoke_service)
-        self.router = APIRouter(prefix=self.PREFIX, tags=["chats"])
-        self._register_routes()
+        super().__init__()
 
     def _register_routes(self) -> None:
         router = self.router

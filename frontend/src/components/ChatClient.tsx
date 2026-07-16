@@ -1,5 +1,7 @@
+'use client'
+
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { cancelStream, clearFromLastUser, getHistory, speechToText, streamAgent, ThreadNotFoundError } from './api'
+import { cancelStream, clearFromLastUser, getHistory, speechToText, streamAgent, ThreadNotFoundError } from '@/api'
 import type {
   ActionRequest,
   ChatMessage,
@@ -10,9 +12,8 @@ import type {
   StreamChunk,
   ThreadHistoryResponse,
   ToolEvent,
-} from './types'
-import { GENERAL_AGENT_ID } from './types'
-import './App.css'
+} from '@/types'
+import { GENERAL_AGENT_ID } from '@/types'
 
 type MicState = 'idle' | 'recording' | 'transcribing'
 
@@ -762,12 +763,12 @@ function MessageCard({
   )
 }
 
-export default function App() {
+export default function ChatClient() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
-  const [threadId, setThreadId] = useState<string | null>(() => threadIdFromLocation())
+  const [threadId, setThreadId] = useState<string | null>(null)
   const [streaming, setStreaming] = useState(false)
-  const [loadingHistory, setLoadingHistory] = useState(() => Boolean(threadIdFromLocation()))
+  const [loadingHistory, setLoadingHistory] = useState(false)
   const [pendingHitl, setPendingHitl] = useState<PendingHitl | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [micState, setMicState] = useState<MicState>('idle')
