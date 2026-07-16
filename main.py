@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from invoke_service import InvokeService
 from schemas.invoke_request import InvokeAgent
 from schemas.invoke_response import InvokeResponse
+from schemas.thread_rewind_response import ThreadRewindResponse
 from schemas.thread_teardown_response import ThreadTeardownResponse
 from stream_service import StreamService
 from db.agent_store import init_agent_db
@@ -99,6 +100,31 @@ async def cancel_stream(thread_id: str) -> dict[str, bool | str]:
             detail=f"No active stream found for thread_id {thread_id!r}",
         )
     return {"thread_id": thread_id, "cancelled": True}
+
+
+@app.post(
+    "/threads/{thread_id}/clear-from-last-user",
+    response_model=ThreadRewindResponse,
+)
+async def clear_from_last_user(
+    thread_id: str,
+    agent_id: int | None = Query(
+        default=None,
+        description=(
+            "Agent whose checkpoint to rewind. Defaults to the general agent "
+            "when omitted."
+        ),
+    ),
+) -> ThreadRewindResponse:
+    """Clear checkpoint messages from the last user turn onward.
+
+    Used by regenerate: the client keeps the latest user bubble, calls this
+    endpoint, then ``POST /stream`` with the same prompt. Cancels any active
+    stream for the thread first.
+    """
+    if await stream_service.has_active_stream(thread_id):
+        await stream_service.cancel_stream(thread_id)
+    return await invoke_service.clear_from_last_user(thread_id, agent_id=agent_id)
 
 
 @app.delete("/threads/{thread_id}")

@@ -1,6 +1,7 @@
 """Web search tool and content processing utilities for research agents."""
 
 import base64
+import json
 import logging
 import os
 import re
@@ -26,12 +27,14 @@ from tavily.errors import (
 from typing_extensions import Annotated, Literal
 
 from deepagents.backends.utils import create_file_data
+from schemas.source import Source
 from utils.summarize import Summary, summarize
 from utils.tool_messages import text_tool_message
 
 logger = logging.getLogger(__name__)
 
 WEB_SEARCH_TOOL_ID = 2006
+SOURCES_FILE = "/_sources.json"
 
 _ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 load_dotenv(_ENV_PATH, override=True)
@@ -113,6 +116,55 @@ def _write_file_to_state(files: dict[str, Any], filename: str, content: str) -> 
     else:
         files[path] = content
 
+
+def _merge_source_dicts(
+    existing: list[dict[str, Any]],
+    incoming: list[Source] | list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Dedupe sources by URL, preferring newer entries."""
+    by_url: dict[str, dict[str, Any]] = {}
+    for item in existing:
+        url = str(item.get("url") or "")
+        if url:
+            by_url[url] = item
+    for item in incoming:
+        payload = item.model_dump() if isinstance(item, Source) else dict(item)
+        url = str(payload.get("url") or "")
+        if url:
+            by_url[url] = payload
+    return list(by_url.values())
+
+
+def _load_sources_file(files: dict[str, Any]) -> list[dict[str, Any]]:
+    """Parse ``/_sources.json`` from virtual files if present."""
+    entry = files.get(SOURCES_FILE) or files.get(SOURCES_FILE.lstrip("/"))
+    if entry is None:
+        return []
+    raw: Any = entry
+    if isinstance(entry, dict) and "content" in entry:
+        content = entry.get("content")
+        if isinstance(content, list):
+            raw = "\n".join(str(line) for line in content)
+        else:
+            raw = content
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _write_sources_file(files: dict[str, Any], sources: list[Source]) -> None:
+    """Persist merged sources for later run_finished / HITL turns."""
+    merged = _merge_source_dicts(_load_sources_file(files), sources)
+    _write_file_to_state(
+        files,
+        SOURCES_FILE,
+        json.dumps(merged, ensure_ascii=False, indent=2),
+    )
+
 def get_today_str() -> str:
     """Get current date in a human-readable format."""
     return datetime.now().strftime("%a %b %-d, %Y")
@@ -182,6 +234,7 @@ def run_tavily_search(
     search_depth: Literal["basic", "advanced", "fast", "ultra-fast"] = "advanced",
     time_range: Literal["day", "week", "month", "year"] | None = None,
     include_answer: bool = True,
+    include_favicon: bool = True,
 ) -> dict:
     """Perform search using Tavily API for a single query.
 
@@ -193,6 +246,7 @@ def run_tavily_search(
         search_depth: Tavily depth — advanced improves relevance for factual Q&A
         time_range: Optional recency filter (day/week/month/year)
         include_answer: Ask Tavily for a grounded answer summary
+        include_favicon: Include favicon URLs for each source
 
     Returns:
         Search results dictionary
@@ -209,6 +263,7 @@ def run_tavily_search(
         "topic": topic,
         "search_depth": search_depth,
         "include_answer": include_answer,
+        "include_favicon": include_favicon,
     }
     if time_range:
         kwargs["time_range"] = time_range
@@ -325,12 +380,37 @@ def process_search_results(results: dict) -> list[dict]:
                 "summary": summary_obj.summary,
                 "filename": summary_obj.filename,
                 "raw_content": raw_content,
+                "content": result.get("content") or "",
                 "published_date": result.get("published_date"),
                 "score": result.get("score"),
+                "favicon": result.get("favicon"),
             })
 
     return processed_results
 
+
+def _sources_from_processed(processed_results: list[dict]) -> list[Source]:
+    """Map processed Tavily hits into stream Source models."""
+    sources: list[Source] = []
+    for result in processed_results:
+        score = result.get("score")
+        try:
+            score_value = float(score) if score is not None else 0.0
+        except (TypeError, ValueError):
+            score_value = 0.0
+        snippet = (result.get("content") or result.get("summary") or "").strip()
+        sources.append(
+            Source(
+                title=str(result.get("title") or "Untitled"),
+                url=str(result.get("url") or ""),
+                content=snippet,
+                score=score_value,
+                raw_content=result.get("raw_content"),
+                published_date=result.get("published_date"),
+                favicon=result.get("favicon"),
+            )
+        )
+    return sources
 
 @tool(parse_docstring=True)
 def web_search_tool(
@@ -385,6 +465,7 @@ def web_search_tool(
             include_raw_content=True,
             time_range=resolved_time_range,
             include_answer=True,
+            include_favicon=True,
         )
         processed_results = process_search_results(search_results)
     except Exception as exc:
@@ -461,11 +542,18 @@ Files: {', '.join(saved_files)}
 💡 Prefer recent published dates. Use read_file() for full details when needed.
 ⚠️ Do not conclude an event has not happened yet if recent sources say otherwise."""
 
+    sources = _sources_from_processed(processed_results)
+    _write_sources_file(files, sources)
+
     return Command(
         update={
             "files": files,
             "messages": [
-                text_tool_message(summary_text, tool_call_id),
+                text_tool_message(
+                    summary_text,
+                    tool_call_id,
+                    sources=sources,
+                ),
             ],
         }
     )

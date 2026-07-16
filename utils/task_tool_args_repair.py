@@ -70,7 +70,8 @@ def repair_tool_call_args(
         if not str(args.get("description") or "").strip() and user_text:
             args["description"] = (
                 "Research and answer this user question with up-to-date "
-                "sources. Return a concise factual answer with citations.\n\n"
+                "sources. Return a concise factual answer only — do not "
+                "include inline citations or a Sources section.\n\n"
                 f"Question: {user_text}"
             )
             changed = True

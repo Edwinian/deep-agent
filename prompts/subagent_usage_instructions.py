@@ -32,7 +32,7 @@ Do **not** confidently invent outcomes for ongoing or recent events. If unsure, 
    - subagent_type: Type of agent to use (e.g., "{AgentName.RESEARCH_AGENT}", "{AgentName.RAG_AGENT}")
    - Correct example:
      task(
-       description="Which teams reached the FIFA World Cup 2026 final? Return team names with sources.",
+       description="Which teams reached the FIFA World Cup 2026 final? Return team names only.",
        subagent_type="{AgentName.RESEARCH_AGENT}"
      )
 2. **think_tool(reflection)**: Reflect on the results of each delegated task and plan next steps.

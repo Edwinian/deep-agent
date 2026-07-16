@@ -84,6 +84,35 @@ export async function cancelStream(threadId: string): Promise<void> {
   }
 }
 
+export type ClearFromLastUserResult = {
+  thread_id: string
+  message: string
+  removed_count: number
+  remaining_count: number
+}
+
+export async function clearFromLastUser(
+  threadId: string,
+  agentId?: number,
+): Promise<ClearFromLastUserResult> {
+  const params = new URLSearchParams()
+  if (agentId != null) {
+    params.set('agent_id', String(agentId))
+  }
+  const query = params.toString()
+  const response = await fetch(
+    `${API_BASE}/threads/${encodeURIComponent(threadId)}/clear-from-last-user${
+      query ? `?${query}` : ''
+    }`,
+    { method: 'POST' },
+  )
+  if (!response.ok) {
+    const detail = await response.text()
+    throw new Error(detail || `Clear failed (${response.status})`)
+  }
+  return (await response.json()) as ClearFromLastUserResult
+}
+
 export type TranscriptionResult = {
   text: string
   utterances?: Array<{

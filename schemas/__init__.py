@@ -41,6 +41,7 @@ from schemas.invoke_response import (
     ToolCall,
     ToolCallStatus,
 )
+from schemas.source import SOURCES_KEY, Source
 
 __all__ = [
     "ActionRequest",
@@ -59,6 +60,8 @@ __all__ = [
     "MessageType",
     "ReviewConfig",
     "SerializedMessage",
+    "Source",
+    "SOURCES_KEY",
     "StreamChunk",
     "StreamContentType",
     "StreamEvent",

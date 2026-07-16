@@ -6,8 +6,15 @@ import uuid
 from typing import Any
 
 from fastapi import HTTPException
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, messages_to_dict
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    RemoveMessage,
+    messages_to_dict,
+)
 from langchain_core.runnables.config import RunnableConfig
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Checkpointer
 
@@ -20,6 +27,7 @@ from schemas.invoke_response import (
     InvokeStatus,
     SerializedMessage,
 )
+from schemas.thread_rewind_response import ThreadRewindResponse
 from schemas.thread_teardown_response import ThreadTeardownResponse
 from mcp_interceptors.mcp_auth import mcp_access_token_context
 from utils.compile_agent import compile_agent
@@ -42,6 +50,10 @@ _INTERRUPT_NOT_FOUND_DETAIL = (
 _THREAD_AWAITING_PERMISSION_DETAIL = (
     "Thread is awaiting tool permission. Approve, edit, or reject the pending "
     "action before deleting the thread."
+)
+
+_NO_USER_MESSAGE_DETAIL = (
+    "No user message found in this thread. Send a message before regenerating."
 )
 
 
@@ -322,6 +334,71 @@ class InvokeService:
             if collect_pending_interrupts(snapshot):
                 return True
         return False
+
+    @staticmethod
+    def _is_human_message(message: Any) -> bool:
+        if isinstance(message, HumanMessage):
+            return True
+        if isinstance(message, dict) and message.get("type") == "human":
+            return True
+        return False
+
+    @staticmethod
+    def _message_text(message: Any) -> str:
+        if isinstance(message, BaseMessage):
+            return InvokeService.content_to_text(message.content).strip()
+        if isinstance(message, dict):
+            data = message.get("data")
+            if isinstance(data, dict):
+                return InvokeService.content_to_text(data.get("content")).strip()
+            return InvokeService.content_to_text(message.get("content")).strip()
+        return ""
+
+    async def clear_from_last_user(
+        self,
+        thread_id: str,
+        *,
+        agent_id: int | None = None,
+    ) -> ThreadRewindResponse:
+        """Remove the last user turn and everything after it from checkpoint state.
+
+        Keeps prior turns intact so ``POST /stream`` can re-append the same user
+        prompt for regenerate. Also clears pending HITL interrupts by rewriting
+        checkpoint messages.
+        """
+        resolved_agent_id = agent_id if agent_id is not None else GENERAL_AGENT_ID
+        agent = await self.get_compiled_agent(resolved_agent_id, None)
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+        snapshot = await agent.aget_state(config, subgraphs=True)
+        messages = list((snapshot.values or {}).get("messages") or [])
+        if not messages:
+            raise HTTPException(status_code=404, detail=_NO_USER_MESSAGE_DETAIL)
+
+        last_human_idx = None
+        for index in range(len(messages) - 1, -1, -1):
+            if self._is_human_message(messages[index]):
+                last_human_idx = index
+                break
+
+        if last_human_idx is None:
+            raise HTTPException(status_code=404, detail=_NO_USER_MESSAGE_DETAIL)
+
+        last_user_text = self._message_text(messages[last_human_idx])
+        if not last_user_text:
+            raise HTTPException(status_code=404, detail=_NO_USER_MESSAGE_DETAIL)
+
+        kept = messages[:last_human_idx]
+        removed_count = len(messages) - len(kept)
+        await agent.aupdate_state(
+            config,
+            {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *kept]},
+        )
+        return ThreadRewindResponse(
+            thread_id=thread_id,
+            message=last_user_text,
+            removed_count=removed_count,
+            remaining_count=len(kept),
+        )
 
     async def teardown_thread(
         self,

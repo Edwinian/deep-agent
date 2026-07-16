@@ -11,7 +11,7 @@ Delegate a task to an isolated subagent. You MUST pass both required arguments:
 
 Example:
   task(
-    description="Find which teams reached the FIFA World Cup 2026 final. Return team names and sources.",
+    description="Find which teams reached the FIFA World Cup 2026 final. Return team names only.",
     subagent_type="research_agent"
   )
 

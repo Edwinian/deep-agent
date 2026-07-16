@@ -18,6 +18,16 @@ export type ActionRequest = {
   description?: string
 }
 
+export type Source = {
+  title: string
+  url: string
+  content: string
+  score: number
+  raw_content?: string | null
+  published_date?: string | null
+  favicon?: string | null
+}
+
 export type StreamMessageKind =
   | 'text'
   | 'reasoning'
@@ -51,6 +61,8 @@ export type StreamChunk = {
   action_requests?: ActionRequest[] | null
   interrupt_ids?: string[] | null
   tool_calls?: unknown[] | null
+  content_type?: string | null
+  sources?: Source[] | null
 }
 
 export type ToolEvent = {
@@ -71,6 +83,7 @@ export type ChatMessage = {
   reasoningStreaming?: boolean
   tools?: ToolEvent[]
   reasoning?: string
+  sources?: Source[]
 }
 
 export type PendingHitl = {

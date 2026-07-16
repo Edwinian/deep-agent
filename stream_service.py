@@ -24,6 +24,7 @@ from schemas.invoke_response import (
     StreamTextChunk,
 )
 from schemas.content_type import CONTENT_TYPE_KEY
+from schemas.source import SOURCES_KEY, Source
 from mcp_interceptors.mcp_auth import mcp_access_token_context
 from utils.daytona_sandbox import sync_skills_for_thread
 from utils.hitl import collect_action_requests
@@ -93,8 +94,8 @@ class StreamService:
     @staticmethod
     def _tool_message_stream_fields(
         tool_message: ToolMessage,
-    ) -> tuple[str, str | None]:
-        """Extract client-facing content and optional content type from a ToolMessage."""
+    ) -> tuple[str, str | None, list[Source] | None]:
+        """Extract client-facing content, content type, and sources from a ToolMessage."""
         content = tool_message.content
         if not isinstance(content, str):
             content = InvokeService.content_to_text(content)
@@ -103,7 +104,21 @@ class StreamService:
             content_type = str(content_type)
         else:
             content_type = None
-        return content, content_type
+
+        sources: list[Source] | None = None
+        raw_sources = tool_message.additional_kwargs.get(SOURCES_KEY)
+        if isinstance(raw_sources, list) and raw_sources:
+            parsed: list[Source] = []
+            for item in raw_sources:
+                try:
+                    if isinstance(item, Source):
+                        parsed.append(item)
+                    elif isinstance(item, dict):
+                        parsed.append(Source.model_validate(item))
+                except Exception:
+                    continue
+            sources = parsed or None
+        return content, content_type, sources
 
     @staticmethod
     def serialize_tool_output(output: Any) -> Any:
@@ -115,9 +130,16 @@ class StreamService:
 
         tool_message = StreamService._tool_message_from_output(output)
         if tool_message is not None:
-            content, content_type = StreamService._tool_message_stream_fields(tool_message)
+            content, content_type, sources = StreamService._tool_message_stream_fields(
+                tool_message
+            )
+            payload: dict[str, Any] = {"content": content}
             if content_type is not None:
-                return {"content_type": content_type, "content": content}
+                payload["content_type"] = content_type
+            if sources:
+                payload["sources"] = [source.model_dump() for source in sources]
+            if content_type is not None or sources:
+                return payload
             return content
 
         if isinstance(output, ToolMessage):
@@ -542,6 +564,71 @@ class StreamService:
                 )
             )
 
+    @staticmethod
+    def collect_sources_from_state(raw_result: dict[str, Any]) -> list[Source]:
+        """Collect Source payloads from tool messages and ``/_sources.json``."""
+        from tools.web_search.web_search_tool import SOURCES_FILE, _load_sources_file
+
+        by_url: dict[str, Source] = {}
+
+        def _add(items: list[Any]) -> None:
+            for item in items:
+                try:
+                    source = (
+                        item
+                        if isinstance(item, Source)
+                        else Source.model_validate(item)
+                    )
+                except Exception:
+                    continue
+                if source.url:
+                    by_url[source.url] = source
+
+        files = raw_result.get("files")
+        if isinstance(files, dict):
+            _add(_load_sources_file(files))
+            # Also accept either key form written by older runs.
+            if SOURCES_FILE.lstrip("/") in files and SOURCES_FILE not in files:
+                _add(_load_sources_file({SOURCES_FILE: files[SOURCES_FILE.lstrip("/")]}))
+
+        messages = raw_result.get("messages") or []
+        if isinstance(messages, list):
+            for message in messages:
+                tool_message = None
+                if isinstance(message, ToolMessage):
+                    tool_message = message
+                elif isinstance(message, dict):
+                    data = message.get("data") if message.get("type") == "tool" else None
+                    if isinstance(data, dict):
+                        raw_sources = (data.get("additional_kwargs") or {}).get(
+                            SOURCES_KEY
+                        )
+                        if isinstance(raw_sources, list):
+                            _add(raw_sources)
+                        continue
+                if tool_message is not None:
+                    raw_sources = tool_message.additional_kwargs.get(SOURCES_KEY)
+                    if isinstance(raw_sources, list):
+                        _add(raw_sources)
+
+        return list(by_url.values())
+
+    @staticmethod
+    def merge_sources(
+        existing: list[Source] | None,
+        incoming: list[Source] | None,
+    ) -> list[Source] | None:
+        """Dedupe sources by URL."""
+        if not incoming:
+            return existing or None
+        by_url: dict[str, Source] = {
+            source.url: source for source in (existing or []) if source.url
+        }
+        for source in incoming:
+            if source.url:
+                by_url[source.url] = source
+        return list(by_url.values()) or None
+
     async def yield_run_finished_chunk(
         self,
         *,
@@ -549,8 +636,14 @@ class StreamService:
         agent_id: int,
         raw_result: dict[str, Any],
         cancelled: bool = False,
+        sources: list[Source] | None = None,
     ) -> str:
         """Emit one terminal chunk matching invoke's final reply and status."""
+        collected = self.merge_sources(
+            sources,
+            self.collect_sources_from_state(raw_result),
+        )
+
         if cancelled:
             return self.emit_stream_chunk(
                 StreamTextChunk(
@@ -559,6 +652,7 @@ class StreamService:
                     kind=StreamMessageKind.RUN_FINISHED,
                     status=InvokeStatus.CANCELLED,
                     reply=InvokeService.last_ai_reply(raw_result.get("messages", [])),
+                    sources=collected,
                 )
             )
 
@@ -574,6 +668,7 @@ class StreamService:
                     interrupt_ids=self.interrupt_ids_from_payloads(
                         raw_result.get("__interrupt__", [])
                     ),
+                    sources=collected,
                 )
             )
 
@@ -584,6 +679,7 @@ class StreamService:
                 kind=StreamMessageKind.RUN_FINISHED,
                 status=InvokeStatus.COMPLETED,
                 reply=InvokeService.last_ai_reply(raw_result.get("messages", [])),
+                sources=collected,
             )
         )
 
@@ -597,6 +693,7 @@ class StreamService:
         source: StreamContentSource = StreamContentSource.AGENT,
         subagent_name: str | None = None,
         subagent_cause: dict[str, Any] | None = None,
+        collected_sources: list[Source] | None = None,
     ) -> AsyncIterator[str]:
         """Stream one ``run.tool_calls`` handle: start, output deltas, and finish."""
         tool_call_id = str(getattr(tool_call, "tool_call_id", "") or "")
@@ -669,8 +766,17 @@ class StreamService:
         tool_message = self._tool_message_from_output(raw_output)
         tool_content: str | None = None
         tool_content_type: str | None = None
+        tool_sources: list[Source] | None = None
         if tool_message is not None:
-            tool_content, tool_content_type = self._tool_message_stream_fields(tool_message)
+            tool_content, tool_content_type, tool_sources = (
+                self._tool_message_stream_fields(tool_message)
+            )
+
+        if tool_sources and collected_sources is not None:
+            merged = self.merge_sources(collected_sources, tool_sources)
+            collected_sources.clear()
+            if merged:
+                collected_sources.extend(merged)
 
         yield self.emit_stream_chunk(
             StreamTextChunk(
@@ -681,6 +787,7 @@ class StreamService:
                 input=resolved_input,
                 content=tool_content,
                 content_type=tool_content_type,
+                sources=tool_sources,
                 output=self.serialize_tool_output(raw_output),
                 error=getattr(tool_call, "error", None),
             )
@@ -693,6 +800,7 @@ class StreamService:
         thread_id: str,
         agent_id: int,
         seen_interrupt_ids: set[str],
+        collected_sources: list[Source] | None = None,
     ) -> AsyncIterator[str]:
         """Stream one ``run.subagents`` handle: nested messages and tool calls."""
         subagent_name, subagent_cause = self.resolve_subagent_metadata(subagent)
@@ -745,6 +853,7 @@ class StreamService:
                     source=StreamContentSource.SUBAGENT,
                     subagent_name=subagent_name,
                     subagent_cause=subagent_cause,
+                    collected_sources=collected_sources,
                 ):
                     yield line
 
@@ -803,6 +912,7 @@ class StreamService:
             )
 
             seen_interrupt_ids: set[str] = set()
+            collected_sources: list[Source] = []
 
             async with self._runs_lock:
                 self._active_runs[thread_id] = run
@@ -838,6 +948,7 @@ class StreamService:
                                 thread_id=thread_id,
                                 agent_id=agent_id,
                                 seen_interrupt_ids=seen_interrupt_ids,
+                                collected_sources=collected_sources,
                             ):
                                 yield line
                             continue
@@ -848,6 +959,7 @@ class StreamService:
                                 thread_id=thread_id,
                                 agent_id=agent_id,
                                 seen_interrupt_ids=seen_interrupt_ids,
+                                collected_sources=collected_sources,
                             ):
                                 yield line
 
@@ -869,6 +981,7 @@ class StreamService:
                         agent_id=agent_id,
                         raw_result=raw_result,
                         cancelled=cancelled,
+                        sources=list(collected_sources) or None,
                     )
             finally:
                 async with self._runs_lock:

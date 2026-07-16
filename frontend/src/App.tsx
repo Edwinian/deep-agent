@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { cancelStream, speechToText, streamAgent } from './api'
+import { cancelStream, clearFromLastUser, speechToText, streamAgent } from './api'
 import type {
   ActionRequest,
   ChatMessage,
   DecisionType,
   PendingHitl,
   Permission,
+  Source,
   StreamChunk,
   ToolEvent,
 } from './types'
@@ -50,6 +51,15 @@ function formatArgs(args: Record<string, unknown>): string {
   }
 }
 
+function stripInlineSources(text: string): string {
+  return text
+    .replace(/\s*\(\s*sources?\s*:[^)]+\)/gi, '')
+    .replace(/\n{0,2}\*{0,2}Sources?\*{0,2}\s*(\([^)]*\)\s*)?:[\s\S]*$/i, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trimEnd()
+}
+
 /** Backend surfaces HITL pauses as tool_call_finished.error = "(Interrupt(...),)". */
 function isInterruptPayload(value: unknown): boolean {
   if (value == null) return false
@@ -65,6 +75,203 @@ function toolFinishStatus(
   return 'error'
 }
 
+function mergeSources(
+  existing: Source[] | undefined,
+  incoming: Source[] | null | undefined,
+): Source[] | undefined {
+  if (!incoming?.length) return existing
+  const byUrl = new Map<string, Source>()
+  for (const source of existing ?? []) {
+    if (source.url) byUrl.set(source.url, source)
+  }
+  for (const source of incoming) {
+    if (!source.url) continue
+    byUrl.set(source.url, source)
+  }
+  const merged = [...byUrl.values()]
+  return merged.length ? merged : existing
+}
+
+/** Sources from all assistant messages after the latest user message. */
+function sourcesSinceLastUser(messages: ChatMessage[]): Source[] {
+  let start = 0
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === 'user') {
+      start = i + 1
+      break
+    }
+  }
+  let merged: Source[] | undefined
+  for (let i = start; i < messages.length; i += 1) {
+    const message = messages[i]
+    if (message?.role === 'assistant') {
+      merged = mergeSources(merged, message.sources)
+    }
+  }
+  return merged ?? []
+}
+
+function sourcesForTurn(messages: ChatMessage[], messageId: string): Source[] {
+  const index = messages.findIndex((message) => message.id === messageId)
+  if (index < 0) return []
+  return sourcesSinceLastUser(messages.slice(0, index + 1))
+}
+
+function faviconForSource(source: Source): string {
+  if (source.favicon) return source.favicon
+  try {
+    const host = new URL(source.url).hostname
+    return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64`
+  } catch {
+    return `https://www.google.com/s2/favicons?domain=example.com&sz=64`
+  }
+}
+
+function sourceHostname(source: Source): string {
+  try {
+    return new URL(source.url).hostname.replace(/^www\./, '')
+  } catch {
+    return 'source'
+  }
+}
+
+function formatPublishedDate(value: string | null | undefined): string | null {
+  if (!value) return null
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) {
+    const match = value.match(/(\d{4})[/-](\d{1,2})[/-](\d{1,2})/)
+    if (match) {
+      return `${match[1]}/${match[2].padStart(2, '0')}/${match[3].padStart(2, '0')}`
+    }
+    return value
+  }
+  const y = parsed.getUTCFullYear()
+  const m = String(parsed.getUTCMonth() + 1).padStart(2, '0')
+  const d = String(parsed.getUTCDate()).padStart(2, '0')
+  return `${y}/${m}/${d}`
+}
+
+function SourcesPill({
+  sources,
+  onOpen,
+}: {
+  sources: Source[]
+  onOpen: (sources: Source[]) => void
+}) {
+  const preview = sources.slice(0, 3)
+  const label = `${sources.length} source${sources.length === 1 ? '' : 's'}`
+
+  return (
+    <button
+      type="button"
+      className="sources-pill"
+      onClick={() => onOpen(sources)}
+      title="View search results"
+    >
+      <span className="sources-icons" aria-hidden="true">
+        {preview.map((source, index) => (
+          <img
+            key={`${source.url}-${index}`}
+            className="sources-icon"
+            src={faviconForSource(source)}
+            alt=""
+            width={20}
+            height={20}
+            style={{ zIndex: preview.length - index }}
+          />
+        ))}
+      </span>
+      <span className="sources-label">{label}</span>
+    </button>
+  )
+}
+
+function SourcesDrawer({
+  sources,
+  onClose,
+}: {
+  sources: Source[]
+  onClose: () => void
+}) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    const previous = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.body.style.overflow = previous
+    }
+  }, [onClose])
+
+  return (
+    <div className="sources-drawer-root">
+      <button
+        type="button"
+        className="sources-drawer-backdrop"
+        aria-label="Close search results"
+        onClick={onClose}
+      />
+      <aside className="sources-drawer" role="dialog" aria-label="Search results">
+        <header className="sources-drawer-header">
+          <h2>Search results</h2>
+          <button
+            type="button"
+            className="sources-drawer-close"
+            aria-label="Close"
+            onClick={onClose}
+          >
+            ×
+          </button>
+        </header>
+        <ul className="sources-drawer-list">
+          {sources.map((source, index) => {
+            const published = formatPublishedDate(source.published_date)
+            const snippet = (source.content || '').trim()
+            return (
+              <li key={`${source.url}-${index}`}>
+                <a
+                  className="sources-drawer-item"
+                  href={source.url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <div className="sources-drawer-meta">
+                    <span className="sources-drawer-site">
+                      <img
+                        src={faviconForSource(source)}
+                        alt=""
+                        width={16}
+                        height={16}
+                      />
+                      <span>{sourceHostname(source)}</span>
+                      {published ? (
+                        <>
+                          <span className="sources-drawer-sep" aria-hidden="true">
+                            |
+                          </span>
+                          <span>{published}</span>
+                        </>
+                      ) : null}
+                    </span>
+                    <span className="sources-drawer-index">{index + 1}</span>
+                  </div>
+                  <div className="sources-drawer-title">{source.title}</div>
+                  {snippet ? (
+                    <p className="sources-drawer-snippet">{snippet}</p>
+                  ) : null}
+                </a>
+              </li>
+            )
+          })}
+        </ul>
+      </aside>
+    </div>
+  )
+}
+
 function dedupeActionRequests(actions: ActionRequest[]): ActionRequest[] {
   const seen = new Set<string>()
   const deduped: ActionRequest[] = []
@@ -77,47 +284,144 @@ function dedupeActionRequests(actions: ActionRequest[]): ActionRequest[] {
   return deduped
 }
 
+/** Convert Python-ish list/dict literals to JSON (handles nested quotes). */
+function pythonLiteralToJson(input: string): string {
+  let result = ''
+  let i = 0
+  while (i < input.length) {
+    const char = input[i]
+
+    if (char === "'" || char === '"') {
+      const quote = char
+      let out = '"'
+      i += 1
+      while (i < input.length) {
+        const ch = input[i]
+        if (ch === '\\' && i + 1 < input.length) {
+          const next = input[i + 1]
+          if (next === 'n') out += '\\n'
+          else if (next === 't') out += '\\t'
+          else if (next === 'r') out += '\\r'
+          else if (next === '\\') out += '\\\\'
+          else if (next === quote) out += quote === '"' ? '\\"' : "'"
+          else if (next === '"') out += '\\"'
+          else out += next
+          i += 2
+          continue
+        }
+        if (ch === quote) {
+          out += '"'
+          i += 1
+          break
+        }
+        if (ch === '"') {
+          out += '\\"'
+          i += 1
+          continue
+        }
+        if (ch === '\n') {
+          out += '\\n'
+          i += 1
+          continue
+        }
+        out += ch
+        i += 1
+      }
+      result += out
+      continue
+    }
+
+    if (/\d/.test(char) || char === '-') {
+      const start = i
+      i += 1
+      while (i < input.length && /[\d.]/.test(input[i]!)) i += 1
+      result += input.slice(start, i)
+      continue
+    }
+
+    if (/[A-Za-z_]/.test(char)) {
+      const start = i
+      i += 1
+      while (i < input.length && /[A-Za-z0-9_]/.test(input[i]!)) i += 1
+      const word = input.slice(start, i)
+      if (word === 'None') result += 'null'
+      else if (word === 'True') result += 'true'
+      else if (word === 'False') result += 'false'
+      else result += `"${word}"`
+      continue
+    }
+
+    result += char
+    i += 1
+  }
+  return result
+}
+
+function parseContentBlocks(
+  raw: string,
+): Array<Record<string, unknown>> | null {
+  const trimmed = raw.trim()
+  if (!trimmed.startsWith('[')) return null
+
+  const candidates = [trimmed, pythonLiteralToJson(trimmed)]
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown
+      if (Array.isArray(parsed)) {
+        return parsed as Array<Record<string, unknown>>
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  return null
+}
+
 /** Split model content-block payloads into visible text vs thinking. */
 function splitReplyBlocks(raw: string): { text: string; reasoning: string } {
-  const trimmed = raw.trim()
-  if (!trimmed.startsWith('[')) {
+  if (!raw.trim()) {
     return { text: raw, reasoning: '' }
   }
 
-  try {
-    const normalized = trimmed
-      .replace(/'/g, '"')
-      .replace(/\bNone\b/g, 'null')
-      .replace(/\bTrue\b/g, 'true')
-      .replace(/\bFalse\b/g, 'false')
-    const blocks = JSON.parse(normalized) as Array<Record<string, unknown>>
-    if (!Array.isArray(blocks)) {
-      return { text: raw, reasoning: '' }
-    }
-
-    const textParts: string[] = []
-    const reasoningParts: string[] = []
-    for (const block of blocks) {
-      const type = String(block.type || '')
-      if (type === 'reasoning') {
-        const value = block.reasoning ?? block.text ?? ''
-        if (value) reasoningParts.push(String(value))
-      } else if (type === 'text') {
-        const value = block.text ?? block.content ?? ''
-        if (value) textParts.push(String(value))
-      }
-    }
-    if (textParts.length || reasoningParts.length) {
-      return {
-        text: textParts.join('\n\n'),
-        reasoning: reasoningParts.join('\n\n'),
-      }
-    }
-  } catch {
-    // Fall through — treat as plain text.
+  const blocks = parseContentBlocks(raw)
+  if (!blocks) {
+    return { text: raw, reasoning: '' }
   }
 
-  return { text: raw, reasoning: '' }
+  const textParts: string[] = []
+  const reasoningParts: string[] = []
+  let sawKnown = false
+  for (const block of blocks) {
+    const type = String(block.type || '')
+    if (type === 'reasoning') {
+      sawKnown = true
+      const value = block.reasoning ?? block.text ?? ''
+      if (value) reasoningParts.push(String(value))
+    } else if (type === 'text') {
+      sawKnown = true
+      const value = block.text ?? block.content ?? ''
+      if (value) textParts.push(String(value))
+    } else if (type === 'tool_call') {
+      sawKnown = true
+    }
+  }
+
+  if (!sawKnown) {
+    return { text: raw, reasoning: '' }
+  }
+
+  return {
+    text: textParts.join('\n\n'),
+    reasoning: reasoningParts.join('\n\n'),
+  }
+}
+
+function formatToolLabel(name: string): string {
+  return name
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
 }
 
 function ThinkingBlock({
@@ -145,11 +449,12 @@ function ToolEventBlock({ tool }: { tool: ToolEvent }) {
   const running = tool.status === 'running'
   return (
     <details
+      key={running ? `${tool.id}-live` : tool.id}
       className={`collapsible tool-event tool-${tool.status}`}
       open={running || undefined}
     >
       <summary>
-        <span className="tool-summary-name">{tool.name}</span>
+        <span className="tool-summary-name">{formatToolLabel(tool.name)}</span>
         <span className={`tool-status tool-status-${tool.status}`}>
           {tool.status}
         </span>
@@ -274,7 +579,93 @@ function HitlPanel({
   )
 }
 
-function MessageCard({ message }: { message: ChatMessage }) {
+function MessageActions({
+  copyText,
+  onRegenerate,
+  canRegenerate,
+}: {
+  copyText: string
+  onRegenerate?: () => void
+  canRegenerate?: boolean
+}) {
+  const [copied, setCopied] = useState(false)
+
+  const onCopy = async () => {
+    const text = copyText.trim()
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    } catch {
+      setCopied(false)
+    }
+  }
+
+  return (
+    <div className="message-actions" role="group" aria-label="Message actions">
+      <button
+        type="button"
+        className="message-action-btn"
+        onClick={() => void onCopy()}
+        disabled={!copyText.trim()}
+        title={copied ? 'Copied' : 'Copy'}
+        aria-label={copied ? 'Copied' : 'Copy reply'}
+      >
+        {copied ? (
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        ) : (
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
+            <rect x="9" y="9" width="11" height="11" rx="2" />
+            <path d="M5 15V5a2 2 0 0 1 2-2h10" strokeLinecap="round" />
+          </svg>
+        )}
+      </button>
+      {canRegenerate && onRegenerate ? (
+        <button
+          type="button"
+          className="message-action-btn"
+          onClick={onRegenerate}
+          title="Regenerate"
+          aria-label="Regenerate reply"
+        >
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
+            <path
+              d="M4 12a8 8 0 0 1 13.66-5.66M20 4v5h-5M20 12a8 8 0 0 1-13.66 5.66M4 20v-5h5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </button>
+      ) : null}
+    </div>
+  )
+}
+
+function MessageCard({
+  message,
+  turnSources,
+  onOpenSources,
+  onRegenerate,
+  showActions,
+}: {
+  message: ChatMessage
+  turnSources?: Source[]
+  onOpenSources: (sources: Source[]) => void
+  onRegenerate?: () => void
+  showActions?: boolean
+}) {
+  const sources = turnSources?.length ? turnSources : message.sources
+  const split = splitReplyBlocks(message.content)
+  const parsedAsBlocks = parseContentBlocks(message.content) != null
+  const reasoning = message.reasoning || split.reasoning || undefined
+  const bodyText = parsedAsBlocks ? split.text : message.content
+  const copyText = stripInlineSources(bodyText || reasoning || '')
+  const showFooter =
+    !message.streaming && message.role === 'assistant' && Boolean(showActions)
+
   return (
     <article className={`message message-${message.role}`}>
       <div className="message-meta">
@@ -284,9 +675,9 @@ function MessageCard({ message }: { message: ChatMessage }) {
             ? 'Agent'
             : 'System'}
       </div>
-      {message.reasoning ? (
+      {reasoning ? (
         <ThinkingBlock
-          reasoning={message.reasoning}
+          reasoning={reasoning}
           streaming={message.reasoningStreaming}
         />
       ) : null}
@@ -299,15 +690,27 @@ function MessageCard({ message }: { message: ChatMessage }) {
           ))}
         </ul>
       ) : null}
-      {message.content ? (
+      {bodyText ? (
         <div className="message-body">
-          {message.content}
+          {stripInlineSources(bodyText)}
           {message.streaming ? <span className="cursor" aria-hidden="true" /> : null}
         </div>
       ) : message.streaming ? (
         <div className="message-body muted">
           Streaming
           <span className="cursor" aria-hidden="true" />
+        </div>
+      ) : null}
+      {showFooter ? (
+        <div className="message-footer">
+          <MessageActions
+            copyText={copyText}
+            onRegenerate={onRegenerate}
+            canRegenerate={Boolean(onRegenerate)}
+          />
+          {sources?.length ? (
+            <SourcesPill sources={sources} onOpen={onOpenSources} />
+          ) : null}
         </div>
       ) : null}
     </article>
@@ -322,6 +725,7 @@ export default function App() {
   const [pendingHitl, setPendingHitl] = useState<PendingHitl | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [micState, setMicState] = useState<MicState>('idle')
+  const [drawerSources, setDrawerSources] = useState<Source[] | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const bottomRef = useRef<HTMLDivElement | null>(null)
   const assistantIdRef = useRef<string | null>(null)
@@ -399,6 +803,7 @@ export default function App() {
       if (chunk.kind === 'tool_call_finished') {
         updateAssistant((message) => ({
           ...message,
+          sources: mergeSources(message.sources, chunk.sources),
           tools: (message.tools ?? []).map((tool) => {
             if (chunk.tool_call_id && tool.id !== chunk.tool_call_id) {
               if (tool.name !== chunk.tool_name || tool.status !== 'running') {
@@ -424,16 +829,7 @@ export default function App() {
         return
       }
 
-      if (chunk.kind === 'subagent_started' && chunk.subagent_name) {
-        updateAssistant((message) => ({
-          ...message,
-          content:
-            message.content +
-            (message.content ? '\n\n' : '') +
-            `[${chunk.subagent_name}] `,
-        }))
-        return
-      }
+
 
       if (chunk.kind === 'interrupt') {
         const actionRequests = dedupeActionRequests(
@@ -483,12 +879,14 @@ export default function App() {
                 chunk.reasoning_content ||
                 split.reasoning ||
                 undefined,
+              sources: mergeSources(message.sources, chunk.sources),
               reasoningStreaming: false,
             }
           })
         } else {
           updateAssistant((message) => ({
             ...message,
+            sources: mergeSources(message.sources, chunk.sources),
             reasoningStreaming: false,
           }))
         }
@@ -511,6 +909,7 @@ export default function App() {
         }
         updateAssistant((message) => ({
           ...message,
+          sources: mergeSources(message.sources, chunk.sources),
           streaming: false,
           reasoningStreaming: false,
         }))
@@ -540,16 +939,21 @@ export default function App() {
 
       const assistantId = newId()
       assistantIdRef.current = assistantId
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: assistantId,
-          role: 'assistant',
-          content: '',
-          streaming: true,
-          tools: [],
-        },
-      ])
+      setMessages((prev) => {
+        // HITL resume creates a new assistant bubble — keep sources from this turn.
+        const seededSources = permissions ? sourcesSinceLastUser(prev) : undefined
+        return [
+          ...prev,
+          {
+            id: assistantId,
+            role: 'assistant',
+            content: '',
+            streaming: true,
+            tools: [],
+            sources: seededSources?.length ? seededSources : undefined,
+          },
+        ]
+      })
 
       const controller = new AbortController()
       abortRef.current = controller
@@ -603,6 +1007,47 @@ export default function App() {
   const onSend = async () => {
     await sendText(input)
   }
+
+  const onRegenerate = useCallback(async () => {
+    if (streaming || micState !== 'idle') return
+
+    let lastUserIndex = -1
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i]?.role === 'user') {
+        lastUserIndex = i
+        break
+      }
+    }
+    if (lastUserIndex < 0) return
+
+    const prompt = messages[lastUserIndex]?.content?.trim()
+    if (!prompt) return
+
+    setError(null)
+    setPendingHitl(null)
+    setDrawerSources(null)
+    setMessages((prev) => prev.slice(0, lastUserIndex + 1))
+
+    const activeThreadId = threadId
+    if (activeThreadId) {
+      try {
+        if (abortRef.current) {
+          abortRef.current.abort()
+          abortRef.current = null
+          await cancelStream(activeThreadId).catch(() => undefined)
+        }
+        await clearFromLastUser(activeThreadId, GENERAL_AGENT_ID)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to prepare regenerate')
+        return
+      }
+    }
+
+    await runStream({
+      message: prompt,
+      existingThreadId: activeThreadId,
+    })
+  }, [messages, micState, runStream, streaming, threadId])
 
   const startRecording = async () => {
     if (streaming || pendingHitl || micState !== 'idle') return
@@ -760,9 +1205,29 @@ export default function App() {
           </section>
         ) : (
           <div className="message-list">
-            {messages.map((message) => (
-              <MessageCard key={message.id} message={message} />
-            ))}
+            {messages.map((message, index) => {
+              const isLastAssistant =
+                message.role === 'assistant' &&
+                messages.slice(index + 1).every((item) => item.role !== 'assistant')
+              return (
+                <MessageCard
+                  key={message.id}
+                  message={message}
+                  onOpenSources={setDrawerSources}
+                  showActions={isLastAssistant && !message.streaming}
+                  onRegenerate={
+                    isLastAssistant && !message.streaming
+                      ? () => void onRegenerate()
+                      : undefined
+                  }
+                  turnSources={
+                    isLastAssistant && !message.streaming
+                      ? sourcesForTurn(messages, message.id)
+                      : undefined
+                  }
+                />
+              )
+            })}
             <div ref={bottomRef} />
           </div>
         )}
@@ -857,6 +1322,13 @@ export default function App() {
           )}
         </div>
       </footer>
+
+      {drawerSources?.length ? (
+        <SourcesDrawer
+          sources={drawerSources}
+          onClose={() => setDrawerSources(null)}
+        />
+      ) : null}
     </div>
   )
 }

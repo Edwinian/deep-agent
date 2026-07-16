@@ -9,6 +9,8 @@ from langchain.agents.middleware.human_in_the_loop import ActionRequest
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
 
+from schemas.source import Source
+
 
 class MessageType(StrEnum):
     """Serialized LangChain message role."""
@@ -208,6 +210,7 @@ class StreamTextChunk(BaseModel):
     input: dict[str, Any] | None = None
     output: Any | None = None
     content_type: str | None = None
+    sources: list[Source] | None = None
     error: str | None = None
     action_requests: list[dict[str, Any]] | None = None
     interrupt_ids: list[str] | None = None
