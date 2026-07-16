@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from invoke_service import InvokeService
@@ -32,6 +33,16 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Deep Agents API", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 invoke_service = InvokeService()
 stream_service = StreamService(invoke_service)

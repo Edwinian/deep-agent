@@ -6,6 +6,7 @@ from prompts.file_usage_instructions import (
 from prompts.generate_answer import GENERATE_ANSWER
 from prompts.grade_documents import GRADE_DOCUMENTS
 from prompts.ls_description import LS_DESCRIPTION
+from prompts.pii_guardrails import PII_GUARDRAILS
 from prompts.read_file_description import READ_FILE_DESCRIPTION
 from prompts.researcher_instructions import (
     RESEARCHER_INSTRUCTIONS,
@@ -18,6 +19,7 @@ from prompts.subagent_usage_instructions import (
 from prompts.summarize import SUMMARIZE
 from prompts.task_description_prefix import (
     TASK_DESCRIPTION_PREFIX,
+    TASK_TOOL_DESCRIPTION,
 )
 from prompts.todo_usage_instructions import (
     TODO_USAGE_INSTRUCTIONS,
@@ -34,6 +36,7 @@ __all__ = [
     "GENERATE_ANSWER",
     "GRADE_DOCUMENTS",
     "LS_DESCRIPTION",
+    "PII_GUARDRAILS",
     "READ_FILE_DESCRIPTION",
     "RESEARCHER_INSTRUCTIONS",
     "RAG_AGENT_INSTRUCTIONS",
@@ -41,6 +44,7 @@ __all__ = [
     "SUBAGENT_USAGE_INSTRUCTIONS",
     "SUMMARIZE",
     "TASK_DESCRIPTION_PREFIX",
+    "TASK_TOOL_DESCRIPTION",
     "TODO_USAGE_INSTRUCTIONS",
     "WRITE_FILE_DESCRIPTION",
     "WRITE_TODOS_DESCRIPTION",

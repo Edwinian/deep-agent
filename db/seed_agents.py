@@ -14,6 +14,7 @@ from prompts import (
     FILE_USAGE_INSTRUCTIONS,
     GENERATE_ANSWER,
     GRADE_DOCUMENTS,
+    PII_GUARDRAILS,
     RAG_AGENT_INSTRUCTIONS,
     RESEARCHER_INSTRUCTIONS,
     REWRITE_QUERY,
@@ -40,10 +41,14 @@ REWRITE_QUERY_SYSTEM_PROMPT_ID = 6
 
 
 def _build_general_system_prompt() -> str:
+    """Build the general-agent prompt.
+
+    Leaves a ``{date}`` placeholder for runtime formatting in ``resolve_agent``.
+    """
     subagent_instructions = SUBAGENT_USAGE_INSTRUCTIONS.format(
         max_concurrent_research_units=MAX_CONCURRENT_RESEARCH_UNITS,
         max_researcher_iterations=MAX_RESEARCHER_ITERATIONS,
-        date=datetime.now().strftime("%a %b %-d, %Y"),
+        date="{date}",
     )
     return (
         "# TODO MANAGEMENT\n"
@@ -58,16 +63,28 @@ def _build_general_system_prompt() -> str:
         + "\n\n"
         + "# SUB-AGENT DELEGATION\n"
         + subagent_instructions
+        + "\n\n"
+        + "=" * 80
+        + "\n\n"
+        + PII_GUARDRAILS
     )
+
+
+def _build_research_system_prompt() -> str:
+    """Research-agent prompt with runtime ``{date}`` and privacy guardrails."""
+    return RESEARCHER_INSTRUCTIONS.rstrip() + "\n\n" + PII_GUARDRAILS
+
+
+def _build_rag_system_prompt() -> str:
+    """RAG-agent prompt with runtime ``{date}`` and privacy guardrails."""
+    return RAG_AGENT_INSTRUCTIONS.rstrip() + "\n\n" + PII_GUARDRAILS
 
 
 def seed_default_agents(conn: sqlite3.Connection) -> None:
     """Insert default research and general agent configuration."""
-    research_prompt = RESEARCHER_INSTRUCTIONS
+    research_prompt = _build_research_system_prompt()
     general_prompt = _build_general_system_prompt()
-    rag_prompt = RAG_AGENT_INSTRUCTIONS.format(
-        date=datetime.now().strftime("%a %b %-d, %Y"),
-    )
+    rag_prompt = _build_rag_system_prompt()
     now = datetime.now(timezone.utc).isoformat()
 
     conn.executemany(

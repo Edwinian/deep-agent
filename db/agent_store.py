@@ -328,7 +328,7 @@ def _migrate_rag_agent(conn: sqlite3.Connection) -> None:
     from agents.ids import GENERAL_AGENT_ID, RAG_AGENT_ID
     from constants.agent_name import AgentName
     from constants.model_name import ModelName
-    from prompts.rag_agent_instructions import RAG_AGENT_INSTRUCTIONS
+    from db.seed_agents import _build_rag_system_prompt
 
     RAG_SYSTEM_PROMPT_ID = 3
     RETRIEVE_TOOL_ID = 2008
@@ -339,9 +339,7 @@ def _migrate_rag_agent(conn: sqlite3.Connection) -> None:
     ).fetchone()
     if existing is None:
         now = datetime.now(timezone.utc).isoformat()
-        rag_prompt = RAG_AGENT_INSTRUCTIONS.format(
-            date=datetime.now().strftime("%a %b %-d, %Y"),
-        )
+        rag_prompt = _build_rag_system_prompt()
         conn.execute(
             """
             INSERT INTO SystemPrompt (id, name, content, created_at)
@@ -493,6 +491,36 @@ def _migrate_rag_tool_prompts(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_general_agent_prompt(conn: sqlite3.Connection) -> None:
+    """Refresh agent system prompts (delegation rules + privacy guardrails)."""
+    from datetime import datetime, timezone
+
+    from db.seed_agents import (
+        GENERAL_SYSTEM_PROMPT_ID,
+        RAG_SYSTEM_PROMPT_ID,
+        RESEARCH_SYSTEM_PROMPT_ID,
+        _build_general_system_prompt,
+        _build_rag_system_prompt,
+        _build_research_system_prompt,
+    )
+
+    now = datetime.now(timezone.utc).isoformat()
+    prompts = (
+        (RESEARCH_SYSTEM_PROMPT_ID, _build_research_system_prompt()),
+        (GENERAL_SYSTEM_PROMPT_ID, _build_general_system_prompt()),
+        (RAG_SYSTEM_PROMPT_ID, _build_rag_system_prompt()),
+    )
+    for prompt_id, content in prompts:
+        conn.execute(
+            """
+            UPDATE SystemPrompt
+            SET content = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (content, now, prompt_id),
+        )
+
+
 def init_agent_db(conn_string: str | None = None) -> None:
     """Create agent tables and seed defaults when empty."""
     conn = _connect(conn_string)
@@ -544,6 +572,7 @@ def init_agent_db(conn_string: str | None = None) -> None:
         _migrate_function_prompt_names(conn)
         _migrate_generate_answer_prompt(conn)
         _migrate_rag_tool_prompts(conn)
+        _migrate_general_agent_prompt(conn)
         conn.commit()
 
         count = conn.execute("SELECT COUNT(*) FROM Agent").fetchone()[0]

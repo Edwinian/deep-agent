@@ -57,15 +57,34 @@ def _interrupt_value(interrupt: LangGraphInterrupt | dict[str, Any]) -> dict[str
     return value if isinstance(value, dict) else {}
 
 
+def _action_request_dedupe_key(action_request: dict[str, Any]) -> tuple[str, str]:
+    name = str(action_request.get("name") or "")
+    args = action_request.get("args") or {}
+    if isinstance(args, dict):
+        return name, repr(sorted(args.items()))
+    return name, repr(args)
+
+
 def collect_action_requests(
     interrupts: tuple[LangGraphInterrupt, ...] | list[Any],
 ) -> list[ActionRequest]:
-    """Flatten LangGraph interrupt payloads into client-facing action requests."""
+    """Flatten LangGraph interrupt payloads into client-facing action requests.
+
+    Duplicate identical ``(name, args)`` entries (e.g. parallel empty tool
+    calls from the model) are collapsed so the client shows one card per
+    distinct action. Resume still expands one permission per pending request
+    via :func:`build_resume_command`.
+    """
     action_requests: list[ActionRequest] = []
+    seen: set[tuple[str, str]] = set()
 
     for interrupt in interrupts:
         value = _interrupt_value(interrupt)
         for action_request in value.get("action_requests", []):
+            key = _action_request_dedupe_key(action_request)
+            if key in seen:
+                continue
+            seen.add(key)
             item: ActionRequest = {
                 "name": action_request["name"],
                 "args": action_request["args"],
