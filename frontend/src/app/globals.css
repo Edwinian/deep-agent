@@ -171,6 +171,39 @@ code {
   margin-bottom: 0.45rem;
 }
 
+.stream-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin: 0 0 0.65rem;
+  padding: 0;
+  list-style: none;
+}
+
+.stream-status-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px dashed var(--line);
+  border-radius: calc(var(--radius) - 4px);
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.stream-status-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.stream-status-text {
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
 .message-body {
   white-space: pre-wrap;
   line-height: 1.55;

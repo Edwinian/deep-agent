@@ -232,7 +232,7 @@ def run_tavily_search(
     topic: Literal["general", "news", "finance"] = "general",
     include_raw_content: bool = True,
     search_depth: Literal["basic", "advanced", "fast", "ultra-fast"] = "advanced",
-    time_range: Literal["day", "week", "month", "year"] | None = None,
+    time_range: Literal["day", "week", "month", "year"] = "week",
     include_answer: bool = True,
     include_favicon: bool = True,
 ) -> dict:
@@ -244,7 +244,7 @@ def run_tavily_search(
         topic: Topic filter for search results
         include_raw_content: Whether to include raw webpage content
         search_depth: Tavily depth — advanced improves relevance for factual Q&A
-        time_range: Optional recency filter (day/week/month/year)
+        time_range: Recency filter (day/week/month/year). Defaults to year.
         include_answer: Ask Tavily for a grounded answer summary
         include_favicon: Include favicon URLs for each source
 
@@ -423,9 +423,9 @@ def web_search_tool(
         InjectedToolArg,
     ] = None,
     time_range: Annotated[
-        Literal["day", "week", "month", "year"] | None,
+        Literal["day", "week", "month", "year"],
         InjectedToolArg,
-    ] = None,
+    ] = "year",
 ) -> Command:
     """Search web and save detailed results to files while returning minimal context.
 
@@ -440,8 +440,7 @@ def web_search_tool(
         max_results: Maximum number of results to return (default: 5)
         topic: Topic filter - 'general', 'news', or 'finance'. Leave unset to
             auto-select 'news' for current-events / sports / live-result queries.
-        time_range: Optional recency filter: 'day', 'week', 'month', or 'year'.
-            Defaults to 'week' when topic is news.
+        time_range: Recency filter: 'day', 'week', 'month', or 'year' (default: year).
 
     Returns:
         Command that saves full results to files and provides minimal summary
@@ -450,10 +449,6 @@ def web_search_tool(
     resolved_topic = topic or (
         "news" if _prefers_news_topic(search_query) else "general"
     )
-    resolved_time_range = time_range
-    if resolved_time_range is None and resolved_topic == "news":
-        resolved_time_range = "week"
-
     # Bias the engine toward today's facts without replacing the user query.
     dated_query = f"{search_query} (as of {get_today_str()})"
 
@@ -463,7 +458,7 @@ def web_search_tool(
             max_results=max_results,
             topic=resolved_topic,
             include_raw_content=True,
-            time_range=resolved_time_range,
+            time_range=time_range,
             include_answer=True,
             include_favicon=True,
         )

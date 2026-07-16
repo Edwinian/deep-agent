@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { cancelStream, clearFromLastUser, getHistory, speechToText, streamAgent, ThreadNotFoundError } from '@/api'
 import type {
   ActionRequest,
@@ -163,14 +163,44 @@ function sourcesForTurn(messages: ChatMessage[], messageId: string): Source[] {
   return sourcesSinceLastUser(messages.slice(0, index + 1))
 }
 
+/** Favicon via Google's domain service — avoids cross-site fetches to publisher URLs. */
 function faviconForSource(source: Source): string {
-  if (source.favicon) return source.favicon
   try {
     const host = new URL(source.url).hostname
     return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64`
   } catch {
     return `https://www.google.com/s2/favicons?domain=example.com&sz=64`
   }
+}
+
+function SourceFavicon({
+  source,
+  width,
+  height,
+  className,
+  style,
+}: {
+  source: Source
+  width: number
+  height: number
+  className?: string
+  style?: CSSProperties
+}) {
+  const [failed, setFailed] = useState(false)
+  if (failed) return null
+  return (
+    <img
+      className={className}
+      src={faviconForSource(source)}
+      alt=""
+      width={width}
+      height={height}
+      loading="lazy"
+      referrerPolicy="no-referrer"
+      style={style}
+      onError={() => setFailed(true)}
+    />
+  )
 }
 
 function sourceHostname(source: Source): string {
@@ -216,11 +246,10 @@ function SourcesPill({
     >
       <span className="sources-icons" aria-hidden="true">
         {preview.map((source, index) => (
-          <img
+          <SourceFavicon
             key={`${source.url}-${index}`}
             className="sources-icon"
-            src={faviconForSource(source)}
-            alt=""
+            source={source}
             width={20}
             height={20}
             style={{ zIndex: preview.length - index }}
@@ -286,12 +315,7 @@ function SourcesDrawer({
                 >
                   <div className="sources-drawer-meta">
                     <span className="sources-drawer-site">
-                      <img
-                        src={faviconForSource(source)}
-                        alt=""
-                        width={16}
-                        height={16}
-                      />
+                      <SourceFavicon source={source} width={16} height={16} />
                       <span>{sourceHostname(source)}</span>
                       {published ? (
                         <>
@@ -475,7 +499,35 @@ function hasRenderableContent(message: ChatMessage): boolean {
   if (bodyText) return true
   if (reasoning) return true
   if (message.tools?.length) return true
+  if (message.statusLines?.length) return true
   return false
+}
+
+function appendStreamStatus(
+  message: ChatMessage,
+  line: string,
+): ChatMessage {
+  if (!message.streaming) {
+    return message
+  }
+  const statusLines = message.statusLines ?? []
+  if (statusLines.includes(line)) {
+    return message
+  }
+  return { ...message, statusLines: [...statusLines, line] }
+}
+
+function StreamStatusBlock({ lines }: { lines: string[] }) {
+  return (
+    <ul className="stream-status-list" aria-label="Agent activity">
+      {lines.map((line) => (
+        <li key={line} className="stream-status-item">
+          <span className="stream-status-label">System</span>
+          <span className="stream-status-text">{line}</span>
+        </li>
+      ))}
+    </ul>
+  )
 }
 
 function formatToolLabel(name: string): string {
@@ -737,6 +789,10 @@ function MessageCard({
             ? 'Agent'
             : 'System'}
       </div>
+      {message.statusLines?.length &&
+      (message.streaming || !bodyText.trim()) ? (
+        <StreamStatusBlock lines={message.statusLines} />
+      ) : null}
       {reasoning ? (
         <ThinkingBlock
           reasoning={reasoning}
@@ -757,7 +813,7 @@ function MessageCard({
           {stripInlineSources(bodyText)}
           {message.streaming ? <span className="cursor" aria-hidden="true" /> : null}
         </div>
-      ) : message.streaming ? (
+      ) : message.streaming && !message.statusLines?.length ? (
         <div className="message-body muted">
           Streaming
           <span className="cursor" aria-hidden="true" />
@@ -886,6 +942,13 @@ export default function ChatClient() {
       if (chunk.thread_id) {
         setThreadId(chunk.thread_id)
         historyLoadedRef.current = chunk.thread_id
+      }
+
+      if (chunk.kind === 'system' && chunk.content) {
+        updateAssistant((message) =>
+          appendStreamStatus(message, String(chunk.content)),
+        )
+        return
       }
 
       if (chunk.kind === 'text' && chunk.delta) {
@@ -1035,6 +1098,7 @@ export default function ChatClient() {
           sources: mergeSources(message.sources, chunk.sources),
           streaming: false,
           reasoningStreaming: false,
+          statusLines: undefined,
         }))
       }
     },

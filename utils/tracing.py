@@ -114,6 +114,13 @@ class TracingMiddleware(BaseHTTPMiddleware):
     """Create one Langfuse span and one LangSmith run per HTTP request."""
 
     async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+        # Do not wrap SSE endpoints with BaseHTTPMiddleware tracing.
+        # Streaming responses are sensitive to middleware behavior and should
+        # remain a direct pass-through.
+        accepts_sse = "text/event-stream" in (request.headers.get("accept", "").lower())
+        if accepts_sse or request.url.path == "/chats/stream":
+            return await call_next(request)
+
         if not is_langfuse_enabled() and not is_langsmith_enabled():
             return await call_next(request)
 
@@ -128,7 +135,7 @@ class TracingMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         project_name = (os.getenv("LANGSMITH_PROJECT") or "").strip() or None
-        with tracing_context(
+        with tracing_context(  # pylint: disable=not-context-manager
             project_name=project_name,
             enabled=is_langsmith_enabled(),
             tags=[request.method, request.url.path],

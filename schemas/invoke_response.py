@@ -185,6 +185,7 @@ class StreamMessageKind(StrEnum):
     MESSAGE_FINISHED = "message_finished"
     RUN_FINISHED = "run_finished"
     INTERRUPT = "interrupt"
+    SYSTEM = "system"
 
 
 class StreamTextChunk(BaseModel):

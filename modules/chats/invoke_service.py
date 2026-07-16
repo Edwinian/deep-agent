@@ -400,13 +400,44 @@ class InvokeService:
             return []
         sources: list[Source] = []
         for item in raw:
-            try:
-                sources.append(
-                    item if isinstance(item, Source) else Source.model_validate(item)
-                )
-            except Exception:
-                continue
+            parsed = InvokeService._parse_source(item)
+            if parsed is not None:
+                sources.append(parsed)
         return sources
+
+    @staticmethod
+    def _parse_source(item: Any) -> Source | None:
+        """Normalize a Source model or raw dict from checkpoint state."""
+        if isinstance(item, Source):
+            return item
+        if isinstance(item, dict):
+            try:
+                return Source.model_validate(item)
+            except Exception:
+                return None
+        return None
+
+    @classmethod
+    def _merge_history_sources(
+        cls,
+        existing: list[Source] | None,
+        incoming: Any,
+    ) -> list[Source] | None:
+        """Dedupe sources by URL, accepting Source models or dict payloads."""
+        merged: dict[str, Source] = {}
+        for source in existing or []:
+            parsed = cls._parse_source(source)
+            if parsed is not None and parsed.url:
+                merged[parsed.url] = parsed
+        if isinstance(incoming, list):
+            items = incoming
+        else:
+            items = [incoming]
+        for item in items:
+            parsed = cls._parse_source(item)
+            if parsed is not None and parsed.url:
+                merged[parsed.url] = parsed
+        return list(merged.values()) or None
 
     @classmethod
     def build_history_messages(
@@ -530,15 +561,10 @@ class InvokeService:
                 if current_assistant is not None:
                     tool_sources = cls._tool_sources(message)
                     if tool_sources:
-                        merged = {
-                            source.url: source
-                            for source in (current_assistant.sources or [])
-                            if source.url
-                        }
-                        for source in tool_sources:
-                            if source.url:
-                                merged[source.url] = source
-                        current_assistant.sources = list(merged.values()) or None
+                        current_assistant.sources = cls._merge_history_sources(
+                            current_assistant.sources,
+                            tool_sources,
+                        )
                 continue
 
         if history and state_values:
@@ -547,15 +573,10 @@ class InvokeService:
             if file_sources:
                 for item in reversed(history):
                     if item.role == "assistant":
-                        merged = {
-                            source.url: source
-                            for source in (item.sources or [])
-                            if source.url
-                        }
-                        for source in file_sources:
-                            if source.url:
-                                merged[source.url] = source
-                        item.sources = list(merged.values()) or None
+                        item.sources = cls._merge_history_sources(
+                            item.sources,
+                            file_sources,
+                        )
                         break
 
         return history

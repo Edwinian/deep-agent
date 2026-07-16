@@ -1,0 +1,592 @@
+# Deep Agents — Technical Documentation
+
+Production LangGraph **deep-agent** framework: multi-agent orchestration, human-in-the-loop (HITL) tool approval, agentic RAG over ChromaDB, web research sub-agents, durable conversation history via LangGraph checkpointers, and dual observability with **Langfuse** and **LangSmith**.
+
+This document is written for engineers and interviewers who want to understand what was built and how each feature works end-to-end.
+
+---
+
+## Table of contents
+
+1. [System overview](#system-overview)
+2. [Architecture](#architecture)
+3. [Agent model](#agent-model)
+4. [Human-in-the-loop (HITL)](#human-in-the-loop-hitl)
+5. [Research agents](#research-agents)
+6. [RAG (retrieval-augmented generation)](#rag-retrieval-augmented-generation)
+7. [Checkpointing and conversation history](#checkpointing-and-conversation-history)
+8. [Tracing: Langfuse and LangSmith](#tracing-langfuse-and-langsmith)
+9. [Streaming (SSE)](#streaming-sse)
+10. [Supporting production features](#supporting-production-features)
+11. [API surface](#api-surface)
+12. [Environment variables](#environment-variables)
+
+---
+
+## System overview
+
+| Layer | Technology | Role |
+|-------|------------|------|
+| Orchestration | LangGraph + `deepagents` | Compiled agent graphs, sub-agent delegation, virtual filesystem |
+| API | FastAPI (`main.py`) | REST + SSE endpoints under `/chats`, `/agents`, `/skills`, etc. |
+| Frontend | Next.js (`frontend/`) | Streaming chat UI, HITL approval panel, thread history, voice input |
+| Agent config DB | SQLite (`db/agent_store.py`) | Agents, system prompts, tools, skills persisted and seeded at startup |
+| Checkpoint store | Async SQLite (`data/checkpoints.db`) | Thread-scoped graph state for multi-turn + HITL resume |
+| Vector store | ChromaDB (`chroma_db/`) | Document chunks for RAG |
+| Web search | Tavily API | Live research with source offloading |
+| Observability | Langfuse + LangSmith | Request spans, LLM/tool traces, session metadata |
+
+**Default agent IDs** (seeded in `db/seed_agents.py`):
+
+| ID | Name | Purpose |
+|----|------|---------|
+| 1001 | `research_agent` | Web search + reflection; leaf sub-agent |
+| 1003 | `rag_agent` | ChromaDB retrieval; leaf sub-agent |
+| 1002 | `general_agent` | Orchestrator: todos, files, delegates to research + RAG, MCP tools |
+
+---
+
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph Client
+        UI[Next.js ChatClient]
+    end
+
+    subgraph API["FastAPI (main.py)"]
+        CC[ChatsController]
+        IS[InvokeService]
+        SS[StreamService]
+        CP[(AsyncSqliteSaver)]
+    end
+
+    subgraph Graph["Compiled LangGraph"]
+        GA[general_agent]
+        RA[research_agent]
+        RAG[rag_agent]
+        GA -->|task tool| RA
+        GA -->|task tool| RAG
+    end
+
+    subgraph External
+        Tavily[Tavily Search]
+        Chroma[(ChromaDB)]
+        LF[Langfuse]
+        LS[LangSmith]
+    end
+
+    UI -->|POST /chats/stream| SS
+    UI -->|GET /chats/get-history| IS
+    SS --> IS
+    IS --> Graph
+    Graph --> CP
+    RA --> Tavily
+    RAG --> Chroma
+    IS --> LF
+    IS --> LS
+    SS --> LF
+    SS --> LS
+```
+
+**Compilation path** (`utils/compile_agent.py`):
+
+1. Load `DeepAgent` spec from SQLite via `resolve_agent()`.
+2. Recursively compile nested sub-agents (`utils/compile_subagents.py`).
+3. Call `create_deep_agent()` with tools, `interrupt_on`, checkpointer, PII middleware, and optional Daytona-backed filesystem.
+4. Cache compiled graphs per `agent_id` in `InvokeService`.
+
+**Shared state** (`state.py`):
+
+- `todos` — task list with `pending` / `in_progress` / `completed`
+- `files` — virtual filesystem (context offloading) merged via `file_reducer`
+- `messages` — standard LangGraph agent message history
+
+---
+
+## Agent model
+
+### General agent (orchestrator)
+
+The general agent is the default entry point (`GENERAL_AGENT_ID = 1002`). Its system prompt (`db/seed_agents.py`) combines:
+
+- **TODO management** — plan and track work (`write_todos` / `read_todos`)
+- **Virtual filesystem** — read/write files in agent state (and optionally Daytona sandbox)
+- **Sub-agent delegation** — `task(description, subagent_type)` for research or RAG
+- **PII guardrails** — email, credit card, IP, MAC redaction
+
+It also mounts MCP tool groups: weather, math, and hotel booking.
+
+### Sub-agent delegation workflow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant General as general_agent
+    participant Task as task tool
+    participant Sub as research_agent / rag_agent
+    participant Tools as web_search / retrieve_tool
+
+    User->>General: "Latest SPY price?"
+    General->>General: write_todos (optional)
+    General->>Task: task(description, subagent_type="research_agent")
+    Task->>Sub: spawn isolated context
+    Sub->>Tools: search / retrieve
+    Tools-->>Sub: tool results (+ sources)
+    Sub-->>Task: concise answer
+    Task-->>General: tool message
+    General-->>User: final reply (+ sources in UI)
+```
+
+**Design choices:**
+
+- Sub-agents have **quarantined context** — they cannot see each other's work; the orchestrator must pass complete standalone task descriptions (`prompts/subagent_usage_instructions.py`).
+- **Parallel delegation** — up to 3 concurrent `task` calls per iteration.
+- **Tool arg repair** — `ToolCallArgsRepairMiddleware` fills missing `task` / `web_search_tool` args when models emit empty JSON (`utils/task_tool_args_repair.py`).
+
+---
+
+## Human-in-the-loop (HITL)
+
+### What it does
+
+Certain tools require explicit human approval before execution. The graph **interrupts**, persists state in the checkpointer, and waits for the client to send a **resume** payload with per-tool decisions.
+
+### Tool interrupt policy
+
+Configured in `tools/default_interrupt_on.py` and passed to `create_deep_agent(interrupt_on=...)`:
+
+| Tool | Interrupt? |
+|------|------------|
+| `web_search_tool` | **Yes** |
+| `book-hotel` | **Yes** |
+| `think_tool`, `read_todos`, `retrieve_tool`, weather, math, hotel search | No |
+
+Per-agent overrides are supported via the `interrupt_on` field on `DeepAgent` specs.
+
+### Technical workflow
+
+```mermaid
+sequenceDiagram
+    participant UI as ChatClient
+    participant API as /chats/stream
+    participant Graph as LangGraph + HITL middleware
+    participant CP as Checkpointer
+
+    UI->>API: POST stream { message, thread_id }
+    API->>Graph: astream_events(input)
+    Graph->>Graph: model selects web_search_tool
+    Graph->>Graph: HumanInTheLoopMiddleware interrupts
+    Graph->>CP: persist checkpoint + __interrupt__
+    API-->>UI: SSE kind=interrupt, action_requests
+    UI->>UI: Show approve / edit / reject / respond panel
+    UI->>API: POST stream { thread_id, permissions }
+    API->>Graph: Command(resume={interrupt_id: {decisions}})
+    Note over API,Graph: build_resume_command() in utils/hitl.py
+    Graph->>Graph: execute or skip tool per decision
+    Graph-->>UI: SSE continues → run_finished
+```
+
+### Backend implementation
+
+| Module | Responsibility |
+|--------|----------------|
+| `utils/hitl.py` | `collect_pending_interrupts`, `collect_action_requests`, `build_resume_command`, decision mapping |
+| `modules/chats/invoke_service.py` | `resolve_input_state()` — new message vs resume; `build_invoke_response()` — `awaiting_tool_permission` status |
+| `modules/chats/stream_service.py` | Emits `kind: interrupt` SSE chunks with `action_requests` and `interrupt_ids` |
+| `schemas/invoke_request.py` | `Permission` with `decision`: `approve` \| `edit` \| `reject` \| `respond` |
+
+**Resume semantics:**
+
+- Client sends `permissions` keyed by **tool name** (one decision applies to all pending requests with that name).
+- `build_resume_command()` maps each permission to LangChain `ApproveDecision`, `EditDecision`, `RejectDecision`, or `RespondDecision`.
+- Resume is keyed by **interrupt ID** (required for nested subgraph interrupts, e.g. research sub-agent inside `task`).
+- Duplicate `(name, args)` action requests are collapsed for the UI; resume still expands one decision per pending request.
+
+### Frontend
+
+`frontend/src/components/ChatClient.tsx`:
+
+- On `interrupt` chunk → render `HitlPanel` with approve / edit / reject / respond per tool.
+- On submit → `POST /chats/stream` with same `thread_id` and `permissions` (no new user message).
+- History reload (`GET /chats/get-history/{thread_id}`) restores pending interrupts if the user refreshes mid-approval.
+
+### CLI helpers
+
+- `permit.py` — non-streaming HITL loop for `POST /invoke`
+- `permit_stream.py` — HITL loop over `POST /chats/stream`
+
+---
+
+## Research agents
+
+### What it does
+
+The **research_agent** (ID 1001) is a specialized sub-agent for **live, time-sensitive facts** via Tavily web search. It is invoked by the general agent through the `task` tool with `subagent_type="research_agent"`.
+
+### Tools
+
+| Tool | File | Purpose |
+|------|------|---------|
+| `web_search_tool` | `tools/web_search/web_search_tool.py` | Tavily search; summarizes results; offloads full content to virtual `/_sources.json` |
+| `think_tool` | `tools/think/think_tool.py` | Strategic reflection between searches |
+
+### Technical workflow
+
+```mermaid
+flowchart TD
+    A[General agent calls task] --> B[research_agent receives description]
+    B --> C{Need more info?}
+    C -->|yes| D[web_search_tool query + optional topic=news]
+    D --> E[HITL interrupt if web_search enabled]
+    E --> F[Tavily API]
+    F --> G[Summarize + attach Source metadata]
+    G --> H[Offload to state files /_sources.json]
+    H --> I[think_tool reflection]
+    I --> C
+    C -->|no| J[Return concise factual answer]
+    J --> K[General agent synthesizes final reply]
+```
+
+### Web search pipeline (`web_search_tool`)
+
+1. **Search** — Tavily with configurable `topic`, `time_range` (default `year`), `max_results`.
+2. **Content processing** — HTML → markdown, optional summarization (`utils/summarize.py`).
+3. **Context offloading** — Large result bodies stored in agent `files`; tool message returns a short summary.
+4. **Source tracking** — `Source` objects (title, URL, favicon, score) attached to tool messages and aggregated for the UI sources pill.
+5. **HITL** — Execution pauses until user approves (if `interrupt_on[web_search_tool] == True`).
+
+### Prompt engineering
+
+`prompts/researcher_instructions.py` enforces:
+
+- Short factual search queries (not full research briefs)
+- `topic="news"` for live events
+- Tool call budgets (1–5 searches by complexity)
+- No inline citations in agent text (sources shown separately in UI)
+
+---
+
+## RAG (retrieval-augmented generation)
+
+### What it does
+
+The **rag_agent** (ID 1003) answers questions from **indexed documents** in ChromaDB. The general agent delegates via `task(..., subagent_type="rag_agent")` when the user asks about content that may already be in the vector store.
+
+### Indexing
+
+| Component | Role |
+|-----------|------|
+| `chroma_service.py` | HuggingFace embeddings (`all-MiniLM-L6-v2`), chunking (500 chars / 100 overlap), Chroma persistence at `./chroma_db` |
+| `load_web_documents.py` | Indexes Lilian Weng blog URLs into Chroma (demo corpus) |
+| `ChromaService` | Also supports PDF, DOCX, TXT, HTML upload and web URL ingestion |
+
+Run indexing:
+
+```bash
+python load_web_documents.py
+```
+
+### Agentic RAG inside `retrieve_tool`
+
+The RAG sub-agent exposes a single tool, `retrieve_tool` (`tools/rag/retrieve_tool.py`), which runs an **internal** grade-and-rewrite loop before returning context:
+
+```mermaid
+flowchart TD
+    Q[User query] --> R[Chroma similarity search]
+    R --> G[grade_documents LLM]
+    G -->|relevant| GA[generate_answer LLM]
+    G -->|not relevant| RW[rewrite_query LLM]
+    RW --> R2[Re-retrieve once]
+    R2 --> G2[grade_documents]
+    G2 --> GA
+    GA --> TM[Tool message with grounded answer]
+```
+
+| Step | Module | Model / store |
+|------|--------|---------------|
+| Retrieve | `ChromaService.get_retriever()` | ChromaDB + sentence-transformers |
+| Grade | `tools/rag/grade_documents.py` | Structured output → `GENERATE_ANSWER` or `REWRITE_QUERY` |
+| Rewrite | `tools/rag/rewrite_query.py` | Query reformulation (max 1 retry) |
+| Generate | `tools/rag/generate_answer.py` | Grounded answer from retrieved chunks |
+
+Prompts for grade / rewrite / generate are stored in SQLite (`SystemPrompt` table) and loaded at runtime — editable via the **System Prompts** admin UI.
+
+### RAG agent prompt
+
+`prompts/rag_agent_instructions.py` instructs the sub-agent to:
+
+- Call `retrieve_tool` with a focused query
+- Synthesize from returned context only
+- Admit gaps when retrieval fails
+- Limit to ≤2 `retrieve_tool` calls per task
+
+`retrieve_tool` is **not** HITL-interrupted by default (`DEFAULT_INTERRUPT_ON`).
+
+---
+
+## Checkpointing and conversation history
+
+### What it does
+
+Every conversation turn is tied to a **`thread_id`**. LangGraph's checkpointer persists graph state (messages, todos, files, interrupt payloads) so users can:
+
+- Continue multi-turn chats
+- Resume after HITL approval
+- Reload history after refresh
+- Regenerate the last assistant reply (rewind)
+
+### Checkpointer implementation
+
+`utils/get_checkpointer.py` supports:
+
+| Type | Use case |
+|------|----------|
+| `IN_MEMORY` | Tests / ephemeral |
+| `ASYNC_SQLITE` | **Production default** — `data/checkpoints.db` |
+| `ASYNC_POSTGRESQL` | Scalable deployment option |
+
+**Startup** (`main.py` lifespan):
+
+```python
+await init_sqlite_checkpointer()  # process-wide singleton
+```
+
+Agents compile with `checkpointer=get_checkpointer(CheckpointerType.ASYNC_SQLITE)` unless overridden.
+
+### Technical workflow: new message
+
+```mermaid
+sequenceDiagram
+    participant UI
+    participant API
+    participant Graph
+    participant CP as AsyncSqliteSaver
+
+    UI->>API: stream { message, thread_id }
+    API->>Graph: config.configurable.thread_id = thread_id
+    Graph->>Graph: ainvoke / astream_events
+    Graph->>CP: write checkpoint after each superstep
+    API-->>UI: tokens, tools, run_finished
+    UI->>API: GET get-history/{thread_id}
+    API->>CP: aget_tuple(thread_id)
+    API->>Graph: aget_state(subgraphs=True)
+    API-->>UI: ThreadHistoryResponse messages + tools + sources
+```
+
+### History reconstruction
+
+`InvokeService.build_history_messages()` (`modules/chats/invoke_service.py`):
+
+- Walks checkpoint `messages` (human / AI / tool)
+- Rebuilds assistant bubbles with tool events, reasoning, and merged sources
+- Loads web-search sources from virtual `/_sources.json` in `files` when present
+- Returns `awaiting_tool_permission` + `action_requests` if interrupts are pending
+
+### Thread lifecycle endpoints
+
+| Endpoint | Behavior |
+|----------|----------|
+| `GET /chats/get-history/{thread_id}` | Load messages + HITL state |
+| `POST /chats/rewind/{thread_id}` | Remove last user turn and everything after (for regenerate) |
+| `DELETE /chats/delete-thread/{thread_id}` | Delete checkpoints + Daytona sandbox (blocked if awaiting permission) |
+
+---
+
+## Tracing: Langfuse and LangSmith
+
+### What it does
+
+Dual observability: **Langfuse** for product/session analytics and **LangSmith** for LangChain-native run trees. Both are optional and activated via environment variables.
+
+### Initialization
+
+`utils/tracing.py` — `init_tracing()` runs at import time in `main.py` (after `load_dotenv`):
+
+- Syncs `LANGSMITH_TRACING` / `LANGCHAIN_TRACING_V2` flags
+- Enables tracing only when API keys are present
+
+### Per-agent-run tracing
+
+Every graph invocation merges tracing into `RunnableConfig` via `with_tracing_config()` (`utils/langfuse_tracing.py`):
+
+```python
+config = with_tracing_config(config, thread_id=thread_id, agent_id=agent_id)
+```
+
+This attaches:
+
+| Callback | When active |
+|----------|-------------|
+| `langfuse.langchain.CallbackHandler` | `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` set |
+| `LangChainTracer` | `LANGSMITH_API_KEY` + tracing flags |
+
+**Metadata** on each run:
+
+- `langfuse_session_id` → `thread_id`
+- `langfuse_tags` → `["agent_id:1002"]`
+- `thread_id`, `agent_id`
+
+### HTTP request tracing
+
+`TracingMiddleware` wraps non-SSE HTTP requests:
+
+- Creates one Langfuse span + one LangSmith run per request
+- **Skips** `/chats/stream` (SSE must not be wrapped — streaming pass-through)
+- Records method, path, query, status code; flushes Langfuse on completion/error
+
+### Function-level spans
+
+`@trace(name)` decorator composes Langfuse `@observe` and LangSmith `@traceable` — used in RAG helpers (e.g. `grade_documents`).
+
+### What you can demo in an interview
+
+- Full request → agent → tool → sub-agent tree in LangSmith
+- Session-grouped traces in Langfuse keyed by `thread_id`
+- Compare latency across `research_agent` vs `rag_agent` delegations
+
+---
+
+## Streaming (SSE)
+
+### What it does
+
+`POST /chats/stream` uses LangGraph `astream_events(version="v3")` and projects a unified SSE protocol for the Next.js client.
+
+### Chunk kinds (`schemas/invoke_response.py`)
+
+| Kind | Meaning |
+|------|---------|
+| `text` / `reasoning` | Token deltas from model |
+| `tool_call_started` / `tool_call_finished` | Tool lifecycle + I/O |
+| `subagent_started` / `subagent_finished` | Delegation boundaries |
+| `system` | Transient status (thinking, planning, delegating) — shown inline on assistant bubble |
+| `interrupt` | HITL pause |
+| `message_finished` / `run_finished` | Turn complete; `run_finished` includes `reply` + `sources` |
+
+`StreamService` (`modules/chats/stream_service.py`) merges parallel projections (messages, tool_calls, subagents, values/interrupts) and deduplicates system status lines per run.
+
+### Cancel
+
+`POST /chats/cancel-stream/{thread_id}` aborts the in-flight `AsyncGraphRunStream`.
+
+---
+
+## Supporting production features
+
+### Virtual filesystem and context offloading
+
+- Agent state `files` dict stores research notes, search dumps, and `/_sources.json`.
+- `deepagents` `StateBackend` or **Daytona** sandbox (`utils/daytona_sandbox.py`) when `DAYTONA_SANDBOX_ENABLED=true`.
+- Per-thread sandboxes; skills synced into `/skills/skill_<id>/SKILL.md`.
+
+### Skills
+
+- CRUD at `/skills`; agents reference `skill_ids` in SQLite.
+- `sync_skills_for_thread()` loads skill markdown into the backend before each run.
+
+### PII guardrails
+
+- `PIIMiddleware` on input, output, and tool results (email, credit card, IP, MAC).
+- `RedactedPIIResponseMiddleware` blocks assistant replies that treat `[REDACTED_*]` tokens as real data.
+
+### MCP tools
+
+Weather, math, and hotel tools are loaded via `langchain-mcp-adapters` / FastMCP servers (`mcp_servers/`). Optional Bearer token forwarded from `Authorization` header through `mcp_access_token_context`.
+
+### Speech-to-text
+
+`POST /chats/speech-to-text` — AssemblyAI transcription for voice input in the chat UI.
+
+### Admin UI
+
+Next.js pages for **Agents**, **System Prompts**, and **Skills** CRUD (`frontend/src/components/CrudPage.tsx`).
+
+---
+
+## API surface
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/chats/invoke` | Single-turn invoke (JSON response) |
+| `POST` | `/chats/stream` | SSE streaming (primary UI path) |
+| `POST` | `/chats/cancel-stream/{thread_id}` | Abort stream |
+| `GET` | `/chats/get-history/{thread_id}` | Checkpoint history |
+| `POST` | `/chats/rewind/{thread_id}` | Regenerate support |
+| `DELETE` | `/chats/delete-thread/{thread_id}` | Teardown thread |
+| `POST` | `/chats/speech-to-text` | Audio → text |
+
+Agent, skill, and system-prompt management under `/agents`, `/skills`, `/system-prompts`.
+
+---
+
+## Environment variables
+
+```env
+# Required for core functionality
+TAVILY_API_KEY=...
+ANTHROPIC_API_KEY=...   # or XAI_API_KEY for Grok default model
+XAI_API_KEY=...
+
+# Checkpointing (optional override)
+SQLITE_CONN_STRING=./data/checkpoints.db
+
+# LangSmith
+LANGSMITH_API_KEY=...
+LANGSMITH_TRACING=true
+LANGCHAIN_TRACING_V2=true
+LANGSMITH_PROJECT=deep-agents-from-scratch
+
+# Langfuse
+LANGFUSE_PUBLIC_KEY=...
+LANGFUSE_SECRET_KEY=...
+LANGFUSE_HOST=https://cloud.langfuse.com   # if self-hosted, set accordingly
+
+# RAG
+CHROMA_COLLECTION_NAME=...
+
+# Daytona sandbox (optional)
+DAYTONA_SANDBOX_ENABLED=false
+DAYTONA_API_KEY=...
+
+# Speech
+ASSEMBLYAI_API_KEY=...
+```
+
+---
+
+## Quick start (for reviewers)
+
+```bash
+# Backend
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env   # fill keys
+python load_web_documents.py   # optional: seed RAG corpus
+python main.py
+
+# Frontend
+cd frontend && npm install && npm run dev
+# Open http://127.0.0.1:5173/chats
+```
+
+**Suggested demo flows for interviews:**
+
+1. **Research + HITL** — Ask a live factual question → approve `web_search_tool` → show sources pill and Langfuse session.
+2. **RAG** — Ask about Lilian Weng blog topics (after indexing) → `rag_agent` → `retrieve_tool` grade/rewrite path.
+3. **History** — Refresh page with `?threadId=...` → history restored from SQLite checkpoints.
+4. **Tracing** — Open LangSmith/Langfuse while running a multi-step delegation trace.
+
+---
+
+## Key source files (cheat sheet)
+
+| Feature | Primary files |
+|---------|---------------|
+| HITL | `utils/hitl.py`, `tools/default_interrupt_on.py`, `frontend/src/components/ChatClient.tsx` |
+| Research | `agents/` (seed), `tools/web_search/`, `prompts/researcher_instructions.py` |
+| RAG | `chroma_service.py`, `tools/rag/`, `load_web_documents.py` |
+| Checkpointer | `utils/get_checkpointer.py`, `main.py` (lifespan), `modules/chats/invoke_service.py` |
+| Tracing | `utils/tracing.py`, `utils/langfuse_tracing.py` |
+| Streaming | `modules/chats/stream_service.py`, `schemas/invoke_response.py` |
+| Compilation | `utils/compile_agent.py`, `utils/compile_subagents.py` |

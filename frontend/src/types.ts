@@ -41,6 +41,7 @@ export type StreamMessageKind =
   | 'message_finished'
   | 'run_finished'
   | 'interrupt'
+  | 'system'
 
 export type StreamChunk = {
   thread_id: string
@@ -81,6 +82,8 @@ export type ChatMessage = {
   content: string
   streaming?: boolean
   reasoningStreaming?: boolean
+  /** Transient stream status lines (thinking, delegating, etc.). Cleared when answer text arrives. */
+  statusLines?: string[]
   tools?: ToolEvent[]
   reasoning?: string
   sources?: Source[]

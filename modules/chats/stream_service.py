@@ -32,6 +32,10 @@ from utils.langfuse_tracing import with_langfuse_config
 
 STREAM_EVENTS_VERSION: Literal["v3"] = "v3"
 
+_THINKING_STATUS = "Thinking..."
+_DELEGATING_STATUS = "Delegating to {name}…"
+_RUNNING_SUBAGENT_STATUS = "Running {name}…"
+
 
 class StreamService:
     """Stream v3 message, tool-call, and subagent projections to clients."""
@@ -68,6 +72,62 @@ class StreamService:
         """Serialize one SSE ``data`` frame."""
         payload = json.dumps(chunk.model_dump(mode="json"), ensure_ascii=False)
         return f"data: {payload}\n\n"
+
+    @staticmethod
+    def emit_system_status(
+        *,
+        content: str,
+        thread_id: str,
+        agent_id: int,
+        source: StreamContentSource = StreamContentSource.AGENT,
+        subagent_name: str | None = None,
+        subagent_cause: dict[str, Any] | None = None,
+        node: str | None = None,
+        message_id: str | None = None,
+    ) -> str:
+        """Emit a client-visible status line (thinking, delegation, etc.)."""
+        return StreamService.emit_stream_chunk(
+            StreamTextChunk(
+                thread_id=thread_id,
+                agent_id=agent_id,
+                kind=StreamMessageKind.SYSTEM,
+                source=source,
+                subagent_name=subagent_name,
+                subagent_cause=subagent_cause,
+                node=node,
+                message_id=message_id,
+                content=content,
+            )
+        )
+
+    @staticmethod
+    def emit_system_status_once(
+        seen: set[str],
+        key: str,
+        *,
+        content: str,
+        thread_id: str,
+        agent_id: int,
+        source: StreamContentSource = StreamContentSource.AGENT,
+        subagent_name: str | None = None,
+        subagent_cause: dict[str, Any] | None = None,
+        node: str | None = None,
+        message_id: str | None = None,
+    ) -> str | None:
+        """Emit a status line at most once per dedupe key within one stream run."""
+        if key in seen:
+            return None
+        seen.add(key)
+        return StreamService.emit_system_status(
+            content=content,
+            thread_id=thread_id,
+            agent_id=agent_id,
+            source=source,
+            subagent_name=subagent_name,
+            subagent_cause=subagent_cause,
+            node=node,
+            message_id=message_id,
+        )
 
     @staticmethod
     def _tool_message_from_output(output: Any) -> ToolMessage | None:
@@ -458,6 +518,7 @@ class StreamService:
         source: StreamContentSource = StreamContentSource.AGENT,
         subagent_name: str | None = None,
         subagent_cause: dict[str, Any] | None = None,
+        seen_system_status: set[str] | None = None,
     ) -> AsyncIterator[str]:
         """Stream one ``run.messages`` handle: text, reasoning, and tool-call chunks."""
         node = getattr(message, "node", None)
@@ -502,6 +563,35 @@ class StreamService:
                 )
             )
 
+        if not streamed_reasoning and not streamed_answer_text:
+            status_key = f"{resolved_message_id or 'message'}:{_THINKING_STATUS}"
+            if seen_system_status is not None:
+                line = self.emit_system_status_once(
+                    seen_system_status,
+                    status_key,
+                    content=_THINKING_STATUS,
+                    thread_id=thread_id,
+                    agent_id=agent_id,
+                    source=source,
+                    subagent_name=subagent_name,
+                    subagent_cause=subagent_cause,
+                    node=resolved_node,
+                    message_id=resolved_message_id,
+                )
+                if line:
+                    yield line
+            else:
+                yield self.emit_system_status(
+                    content=_THINKING_STATUS,
+                    thread_id=thread_id,
+                    agent_id=agent_id,
+                    source=source,
+                    subagent_name=subagent_name,
+                    subagent_cause=subagent_cause,
+                    node=resolved_node,
+                    message_id=resolved_message_id,
+                )
+
         async for tool_call_chunk in message.tool_calls:
             yield self.emit_stream_chunk(
                 StreamTextChunk(
@@ -519,6 +609,45 @@ class StreamService:
 
         normalized_tool_calls = self.normalize_tool_calls(finalized)
         if normalized_tool_calls:
+            if not streamed_reasoning and not streamed_answer_text:
+                tool_names = [
+                    str(call.get("name") or "").strip()
+                    for call in normalized_tool_calls
+                    if isinstance(call, dict)
+                ]
+                tool_names = [name for name in tool_names if name]
+                if tool_names:
+                    label = ", ".join(tool_names)
+                    planning_content = f"Planning tool use: {label}…"
+                    if seen_system_status is not None:
+                        status_key = (
+                            f"{resolved_message_id or 'message'}:planning:{label}"
+                        )
+                        line = self.emit_system_status_once(
+                            seen_system_status,
+                            status_key,
+                            content=planning_content,
+                            thread_id=thread_id,
+                            agent_id=agent_id,
+                            source=source,
+                            subagent_name=subagent_name,
+                            subagent_cause=subagent_cause,
+                            node=resolved_node,
+                            message_id=resolved_message_id,
+                        )
+                        if line:
+                            yield line
+                    else:
+                        yield self.emit_system_status(
+                            content=planning_content,
+                            thread_id=thread_id,
+                            agent_id=agent_id,
+                            source=source,
+                            subagent_name=subagent_name,
+                            subagent_cause=subagent_cause,
+                            node=resolved_node,
+                            message_id=resolved_message_id,
+                        )
             yield self.emit_stream_chunk(
                 StreamTextChunk(
                     **common,
@@ -801,6 +930,7 @@ class StreamService:
         agent_id: int,
         seen_interrupt_ids: set[str],
         collected_sources: list[Source] | None = None,
+        seen_system_status: set[str] | None = None,
     ) -> AsyncIterator[str]:
         """Stream one ``run.subagents`` handle: nested messages and tool calls."""
         subagent_name, subagent_cause = self.resolve_subagent_metadata(subagent)
@@ -815,6 +945,53 @@ class StreamService:
                 subagent_cause=subagent_cause,
             )
         )
+        if subagent_name:
+            tool_call_id = ""
+            if isinstance(subagent_cause, dict):
+                raw_id = subagent_cause.get("tool_call_id")
+                if isinstance(raw_id, str):
+                    tool_call_id = raw_id
+            status_scope = tool_call_id or subagent_name
+
+            delegating_content = _DELEGATING_STATUS.format(name=subagent_name)
+            running_content = _RUNNING_SUBAGENT_STATUS.format(name=subagent_name)
+            status_specs = (
+                (
+                    f"{status_scope}:{delegating_content}",
+                    delegating_content,
+                    StreamContentSource.AGENT,
+                    None,
+                ),
+                (
+                    f"{status_scope}:{running_content}",
+                    running_content,
+                    StreamContentSource.SUBAGENT,
+                    subagent_name,
+                ),
+            )
+            for status_key, content, status_source, status_subagent in status_specs:
+                if seen_system_status is not None:
+                    line = self.emit_system_status_once(
+                        seen_system_status,
+                        status_key,
+                        content=content,
+                        thread_id=thread_id,
+                        agent_id=agent_id,
+                        source=status_source,
+                        subagent_name=status_subagent,
+                        subagent_cause=subagent_cause,
+                    )
+                    if line:
+                        yield line
+                else:
+                    yield self.emit_system_status(
+                        content=content,
+                        thread_id=thread_id,
+                        agent_id=agent_id,
+                        source=status_source,
+                        subagent_name=status_subagent,
+                        subagent_cause=subagent_cause,
+                    )
 
         async for name, item in self.merge_projection_feeds(
             self.projection_feeds_for_run(subagent, seen_interrupt_ids=seen_interrupt_ids)
@@ -827,6 +1004,7 @@ class StreamService:
                     source=StreamContentSource.SUBAGENT,
                     subagent_name=subagent_name,
                     subagent_cause=subagent_cause,
+                    seen_system_status=seen_system_status,
                 ):
                     yield line
                 continue
@@ -912,6 +1090,7 @@ class StreamService:
             )
 
             seen_interrupt_ids: set[str] = set()
+            seen_system_status: set[str] = set()
             collected_sources: list[Source] = []
 
             async with self._runs_lock:
@@ -928,6 +1107,7 @@ class StreamService:
                                 item,
                                 thread_id=thread_id,
                                 agent_id=agent_id,
+                                seen_system_status=seen_system_status,
                             ):
                                 yield line
                             continue
@@ -960,6 +1140,7 @@ class StreamService:
                                 agent_id=agent_id,
                                 seen_interrupt_ids=seen_interrupt_ids,
                                 collected_sources=collected_sources,
+                                seen_system_status=seen_system_status,
                             ):
                                 yield line
 
