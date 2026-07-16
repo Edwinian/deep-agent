@@ -6,11 +6,7 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/stream': 'http://127.0.0.1:8000',
-      '/cancel-stream': 'http://127.0.0.1:8000',
-      '/invoke': 'http://127.0.0.1:8000',
-      '/threads': 'http://127.0.0.1:8000',
-      '/speech-to-text': 'http://127.0.0.1:8000',
+      '/chats': 'http://127.0.0.1:8000',
     },
   },
 })

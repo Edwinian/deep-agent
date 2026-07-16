@@ -11,6 +11,7 @@ from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
     RemoveMessage,
+    ToolMessage,
     messages_to_dict,
 )
 from langchain_core.runnables.config import RunnableConfig
@@ -27,12 +28,18 @@ from schemas.invoke_response import (
     InvokeStatus,
     SerializedMessage,
 )
+from schemas.source import SOURCES_KEY, Source
+from schemas.thread_history_response import (
+    HistoryChatMessage,
+    HistoryToolEvent,
+    ThreadHistoryResponse,
+)
 from schemas.thread_rewind_response import ThreadRewindResponse
 from schemas.thread_teardown_response import ThreadTeardownResponse
 from mcp_interceptors.mcp_auth import mcp_access_token_context
 from utils.compile_agent import compile_agent
 from utils.daytona_sandbox import delete_daytona_sandbox, sync_skills_for_thread
-from utils.get_checkpointer import delete_thread_checkpoints
+from utils.get_checkpointer import delete_thread_checkpoints, get_sqlite_checkpointer
 from utils.hitl import (
     build_resume_command,
     collect_action_requests,
@@ -54,6 +61,10 @@ _THREAD_AWAITING_PERMISSION_DETAIL = (
 
 _NO_USER_MESSAGE_DETAIL = (
     "No user message found in this thread. Send a message before regenerating."
+)
+
+_THREAD_NOT_FOUND_DETAIL = (
+    "No checkpoint history found for this thread_id."
 )
 
 
@@ -353,6 +364,240 @@ class InvokeService:
                 return InvokeService.content_to_text(data.get("content")).strip()
             return InvokeService.content_to_text(message.get("content")).strip()
         return ""
+
+    @staticmethod
+    def _message_reasoning(message: Any) -> str:
+        if isinstance(message, AIMessage):
+            from_content = InvokeService.content_to_reasoning(message.content)
+            if from_content:
+                return from_content.strip()
+            extra = message.additional_kwargs or {}
+            reasoning = extra.get("reasoning_content")
+            return str(reasoning).strip() if reasoning else ""
+        if isinstance(message, dict) and message.get("type") == "ai":
+            data = message.get("data")
+            if not isinstance(data, dict):
+                return ""
+            from_content = InvokeService.content_to_reasoning(data.get("content"))
+            if from_content:
+                return from_content.strip()
+            extra = data.get("additional_kwargs") or {}
+            if isinstance(extra, dict):
+                reasoning = extra.get("reasoning_content")
+                return str(reasoning).strip() if reasoning else ""
+        return ""
+
+    @staticmethod
+    def _tool_sources(message: Any) -> list[Source]:
+        raw: Any = None
+        if isinstance(message, ToolMessage):
+            raw = (message.additional_kwargs or {}).get(SOURCES_KEY)
+        elif isinstance(message, dict) and message.get("type") == "tool":
+            data = message.get("data")
+            if isinstance(data, dict):
+                raw = (data.get("additional_kwargs") or {}).get(SOURCES_KEY)
+        if not isinstance(raw, list):
+            return []
+        sources: list[Source] = []
+        for item in raw:
+            try:
+                sources.append(
+                    item if isinstance(item, Source) else Source.model_validate(item)
+                )
+            except Exception:
+                continue
+        return sources
+
+    @classmethod
+    def build_history_messages(
+        cls,
+        messages: list[Any],
+        *,
+        state_values: dict[str, Any] | None = None,
+    ) -> list[HistoryChatMessage]:
+        """Collapse LangChain checkpoint messages into chat UI bubbles."""
+        from tools.web_search.web_search_tool import _load_sources_file
+
+        history: list[HistoryChatMessage] = []
+        current_assistant: HistoryChatMessage | None = None
+        tools_by_id: dict[str, HistoryToolEvent] = {}
+
+        for message in messages:
+            if isinstance(message, HumanMessage) or (
+                isinstance(message, dict) and message.get("type") == "human"
+            ):
+                current_assistant = None
+                tools_by_id = {}
+                msg_id = getattr(message, "id", None) or (
+                    (message.get("data") or {}).get("id")
+                    if isinstance(message, dict)
+                    else None
+                )
+                history.append(
+                    HistoryChatMessage(
+                        id=str(msg_id or uuid.uuid4()),
+                        role="user",
+                        content=cls._message_text(message),
+                    )
+                )
+                continue
+
+            if isinstance(message, AIMessage) or (
+                isinstance(message, dict) and message.get("type") == "ai"
+            ):
+                tool_calls: list[Any] = []
+                msg_id = None
+                if isinstance(message, AIMessage):
+                    msg_id = message.id
+                    tool_calls = list(message.tool_calls or [])
+                elif isinstance(message, dict):
+                    data = message.get("data") or {}
+                    msg_id = data.get("id") if isinstance(data, dict) else None
+                    if isinstance(data, dict):
+                        tool_calls = list(data.get("tool_calls") or [])
+
+                tools: list[HistoryToolEvent] = []
+                tools_by_id = {}
+                for call in tool_calls:
+                    if isinstance(call, dict):
+                        tool_id = str(call.get("id") or uuid.uuid4())
+                        tool = HistoryToolEvent(
+                            id=tool_id,
+                            name=str(call.get("name") or "tool"),
+                            args=dict(call.get("args") or {}),
+                            status="done",
+                        )
+                    else:
+                        tool_id = str(getattr(call, "id", None) or uuid.uuid4())
+                        tool = HistoryToolEvent(
+                            id=tool_id,
+                            name=str(getattr(call, "name", None) or "tool"),
+                            args=dict(getattr(call, "args", None) or {}),
+                            status="done",
+                        )
+                    tools.append(tool)
+                    tools_by_id[tool_id] = tool
+
+                reasoning = cls._message_reasoning(message) or None
+                current_assistant = HistoryChatMessage(
+                    id=str(msg_id or uuid.uuid4()),
+                    role="assistant",
+                    content=cls._message_text(message),
+                    reasoning=reasoning,
+                    tools=tools or None,
+                )
+                history.append(current_assistant)
+                continue
+
+            if isinstance(message, ToolMessage) or (
+                isinstance(message, dict) and message.get("type") == "tool"
+            ):
+                tool_call_id = None
+                tool_name = "tool"
+                output = cls._message_text(message)
+                status = "done"
+                if isinstance(message, ToolMessage):
+                    tool_call_id = message.tool_call_id
+                    tool_name = message.name or tool_name
+                    if getattr(message, "status", None) == "error":
+                        status = "error"
+                elif isinstance(message, dict):
+                    data = message.get("data") or {}
+                    if isinstance(data, dict):
+                        tool_call_id = data.get("tool_call_id")
+                        tool_name = data.get("name") or tool_name
+                        if data.get("status") == "error":
+                            status = "error"
+
+                tool = tools_by_id.get(str(tool_call_id)) if tool_call_id else None
+                if tool is None and current_assistant is not None:
+                    tool = HistoryToolEvent(
+                        id=str(tool_call_id or uuid.uuid4()),
+                        name=str(tool_name),
+                        status=status,  # type: ignore[arg-type]
+                        output=output or None,
+                    )
+                    current_tools = list(current_assistant.tools or [])
+                    current_tools.append(tool)
+                    current_assistant.tools = current_tools
+                    tools_by_id[tool.id] = tool
+                elif tool is not None:
+                    tool.output = output or tool.output
+                    tool.status = status  # type: ignore[assignment]
+                    if tool_name and tool.name == "tool":
+                        tool.name = str(tool_name)
+
+                if current_assistant is not None:
+                    tool_sources = cls._tool_sources(message)
+                    if tool_sources:
+                        merged = {
+                            source.url: source
+                            for source in (current_assistant.sources or [])
+                            if source.url
+                        }
+                        for source in tool_sources:
+                            if source.url:
+                                merged[source.url] = source
+                        current_assistant.sources = list(merged.values()) or None
+                continue
+
+        if history and state_values:
+            files = state_values.get("files")
+            file_sources = _load_sources_file(files) if isinstance(files, dict) else []
+            if file_sources:
+                for item in reversed(history):
+                    if item.role == "assistant":
+                        merged = {
+                            source.url: source
+                            for source in (item.sources or [])
+                            if source.url
+                        }
+                        for source in file_sources:
+                            if source.url:
+                                merged[source.url] = source
+                        item.sources = list(merged.values()) or None
+                        break
+
+        return history
+
+    async def get_history(
+        self,
+        thread_id: str,
+        *,
+        agent_id: int | None = None,
+    ) -> ThreadHistoryResponse:
+        """Load checkpoint messages for a thread as chat history bubbles."""
+        resolved_agent_id = agent_id if agent_id is not None else GENERAL_AGENT_ID
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+
+        checkpointer = await get_sqlite_checkpointer()
+        checkpoint_tuple = await checkpointer.aget_tuple(config)
+        if checkpoint_tuple is None:
+            raise HTTPException(status_code=404, detail=_THREAD_NOT_FOUND_DETAIL)
+
+        agent = await self.get_compiled_agent(resolved_agent_id, None)
+        snapshot = await agent.aget_state(config, subgraphs=True)
+        values = dict(snapshot.values or {})
+        messages = list(values.get("messages") or [])
+        history = self.build_history_messages(messages, state_values=values)
+
+        pending = collect_pending_interrupts(snapshot)
+        if pending:
+            return ThreadHistoryResponse(
+                thread_id=thread_id,
+                agent_id=resolved_agent_id,
+                status=InvokeStatus.AWAITING_TOOL_PERMISSION,
+                messages=history,
+                action_requests=collect_action_requests(pending),
+                interrupt_ids=[interrupt.id for interrupt in pending],
+            )
+
+        return ThreadHistoryResponse(
+            thread_id=thread_id,
+            agent_id=resolved_agent_id,
+            status=InvokeStatus.COMPLETED,
+            messages=history,
+        )
 
     async def clear_from_last_user(
         self,

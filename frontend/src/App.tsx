@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { cancelStream, clearFromLastUser, speechToText, streamAgent } from './api'
+import { cancelStream, clearFromLastUser, getHistory, speechToText, streamAgent, ThreadNotFoundError } from './api'
 import type {
   ActionRequest,
   ChatMessage,
@@ -8,6 +8,7 @@ import type {
   Permission,
   Source,
   StreamChunk,
+  ThreadHistoryResponse,
   ToolEvent,
 } from './types'
 import { GENERAL_AGENT_ID } from './types'
@@ -41,6 +42,50 @@ function extensionForMime(mimeType: string): string {
 
 function newId(): string {
   return crypto.randomUUID()
+}
+
+function threadIdFromLocation(): string | null {
+  if (typeof window === 'undefined') return null
+  const value = new URLSearchParams(window.location.search).get('threadId')?.trim()
+  return value || null
+}
+
+function syncThreadIdInLocation(threadId: string | null) {
+  if (typeof window === 'undefined') return
+  const url = new URL(window.location.href)
+  if (threadId) {
+    url.searchParams.set('threadId', threadId)
+  } else {
+    url.searchParams.delete('threadId')
+  }
+  const next = `${url.pathname}${url.search}${url.hash}`
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`
+  if (next !== current) {
+    window.history.replaceState(null, '', next)
+  }
+}
+
+function historyToChatMessages(history: ThreadHistoryResponse): ChatMessage[] {
+  return history.messages.map((message) => ({
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    reasoning: message.reasoning || undefined,
+    sources: message.sources?.length ? message.sources : undefined,
+    tools: message.tools?.map((tool) => ({
+      id: tool.id,
+      name: tool.name,
+      args: tool.args ?? {},
+      status:
+        tool.status === 'interrupt' || isInterruptPayload(tool.output)
+          ? 'interrupt'
+          : tool.status === 'error'
+            ? 'error'
+            : 'done',
+      output: tool.output || undefined,
+      subagentName: tool.subagent_name,
+    })),
+  }))
 }
 
 function formatArgs(args: Record<string, unknown>): string {
@@ -720,8 +765,9 @@ function MessageCard({
 export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
-  const [threadId, setThreadId] = useState<string | null>(null)
+  const [threadId, setThreadId] = useState<string | null>(() => threadIdFromLocation())
   const [streaming, setStreaming] = useState(false)
+  const [loadingHistory, setLoadingHistory] = useState(() => Boolean(threadIdFromLocation()))
   const [pendingHitl, setPendingHitl] = useState<PendingHitl | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [micState, setMicState] = useState<MicState>('idle')
@@ -732,6 +778,7 @@ export default function App() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const mediaStreamRef = useRef<MediaStream | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
+  const historyLoadedRef = useRef<string | null>(null)
 
   const stopMediaTracks = useCallback(() => {
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop())
@@ -751,6 +798,62 @@ export default function App() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, pendingHitl, streaming])
 
+  useEffect(() => {
+    syncThreadIdInLocation(threadId)
+  }, [threadId])
+
+  useEffect(() => {
+    const initialThreadId = threadIdFromLocation()
+    if (!initialThreadId) {
+      setLoadingHistory(false)
+      return
+    }
+    if (historyLoadedRef.current === initialThreadId) return
+
+    let cancelled = false
+    setLoadingHistory(true)
+    setError(null)
+
+    void getHistory(initialThreadId, GENERAL_AGENT_ID)
+      .then((history) => {
+        if (cancelled) return
+        historyLoadedRef.current = initialThreadId
+        setThreadId(history.thread_id)
+        setMessages(historyToChatMessages(history))
+        if (
+          history.status === 'awaiting_tool_permission' &&
+          history.action_requests?.length
+        ) {
+          setPendingHitl({
+            actionRequests: history.action_requests,
+            interruptIds: history.interrupt_ids ?? [],
+          })
+        } else {
+          setPendingHitl(null)
+        }
+      })
+      .catch((err: Error) => {
+        if (cancelled) return
+        if (err instanceof ThreadNotFoundError) {
+          historyLoadedRef.current = initialThreadId
+          setThreadId(initialThreadId)
+          setMessages([])
+          setPendingHitl(null)
+          return
+        }
+        setError(err.message || 'Failed to load thread history')
+        setMessages([])
+        setPendingHitl(null)
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingHistory(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const updateAssistant = useCallback((updater: (message: ChatMessage) => ChatMessage) => {
     const id = assistantIdRef.current
     if (!id) return
@@ -763,6 +866,7 @@ export default function App() {
     (chunk: StreamChunk) => {
       if (chunk.thread_id) {
         setThreadId(chunk.thread_id)
+        historyLoadedRef.current = chunk.thread_id
       }
 
       if (chunk.kind === 'text' && chunk.delta) {
@@ -936,6 +1040,7 @@ export default function App() {
       if (!threadId) {
         setThreadId(activeThreadId)
       }
+      historyLoadedRef.current = activeThreadId
 
       const assistantId = newId()
       assistantIdRef.current = assistantId
@@ -1170,10 +1275,13 @@ export default function App() {
     setMicState('idle')
     setMessages([])
     setThreadId(null)
+    historyLoadedRef.current = null
     setPendingHitl(null)
     setError(null)
     setInput('')
+    setLoadingHistory(false)
     assistantIdRef.current = null
+    syncThreadIdInLocation(null)
   }
 
   return (
@@ -1195,11 +1303,16 @@ export default function App() {
       </header>
 
       <main className="chat-main">
-        {messages.length === 0 ? (
+        {loadingHistory ? (
+          <section className="empty-state">
+            <h1>Loading thread…</h1>
+            <p>Restoring conversation from checkpoint history.</p>
+          </section>
+        ) : messages.length === 0 ? (
           <section className="empty-state">
             <h1>Ask anything</h1>
             <p>
-              Messages stream from <code>/stream</code>. When a tool needs approval,
+              Messages stream from <code>/chats/stream</code>. When a tool needs approval,
               decide here and the same thread continues.
             </p>
           </section>
@@ -1251,10 +1364,15 @@ export default function App() {
           onChange={(event) => setInput(event.target.value)}
           rows={2}
           disabled={
-            streaming || Boolean(pendingHitl) || micState !== 'idle'
+            loadingHistory ||
+            streaming ||
+            Boolean(pendingHitl) ||
+            micState !== 'idle'
           }
           placeholder={
-            micState === 'recording'
+            loadingHistory
+              ? 'Loading thread history…'
+              : micState === 'recording'
               ? 'Listening… click the mic to stop'
               : micState === 'transcribing'
                 ? 'Transcribing…'
@@ -1282,6 +1400,7 @@ export default function App() {
             }
             aria-pressed={micState === 'recording'}
             disabled={
+              loadingHistory ||
               streaming ||
               Boolean(pendingHitl) ||
               micState === 'transcribing'
@@ -1311,6 +1430,7 @@ export default function App() {
               type="button"
               className="primary-btn"
               disabled={
+                loadingHistory ||
                 !input.trim() ||
                 Boolean(pendingHitl) ||
                 micState !== 'idle'

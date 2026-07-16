@@ -90,3 +90,30 @@ export type PendingHitl = {
   actionRequests: ActionRequest[]
   interruptIds: string[]
 }
+
+export type HistoryToolEvent = {
+  id: string
+  name: string
+  args: Record<string, unknown>
+  status: 'running' | 'done' | 'error' | 'interrupt'
+  output?: string | null
+  subagent_name?: string | null
+}
+
+export type HistoryChatMessage = {
+  id: string
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  reasoning?: string | null
+  tools?: HistoryToolEvent[] | null
+  sources?: Source[] | null
+}
+
+export type ThreadHistoryResponse = {
+  thread_id: string
+  agent_id: number
+  status: 'completed' | 'awaiting_tool_permission' | 'cancelled' | string
+  messages: HistoryChatMessage[]
+  action_requests?: ActionRequest[] | null
+  interrupt_ids?: string[] | null
+}
