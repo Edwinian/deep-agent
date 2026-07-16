@@ -57,7 +57,7 @@ export type ToolEvent = {
   id: string
   name: string
   args: Record<string, unknown>
-  status: 'running' | 'done' | 'error'
+  status: 'running' | 'done' | 'error' | 'interrupt'
   output?: string
   source?: string
   subagentName?: string | null

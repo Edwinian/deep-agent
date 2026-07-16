@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { cancelStream, streamAgent } from './api'
+import { cancelStream, speechToText, streamAgent } from './api'
 import type {
   ActionRequest,
   ChatMessage,
@@ -12,6 +12,32 @@ import type {
 import { GENERAL_AGENT_ID } from './types'
 import './App.css'
 
+type MicState = 'idle' | 'recording' | 'transcribing'
+
+function pickRecorderMimeType(): string {
+  const candidates = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/mp4',
+    'audio/ogg',
+  ]
+  for (const type of candidates) {
+    if (
+      typeof MediaRecorder !== 'undefined' &&
+      MediaRecorder.isTypeSupported(type)
+    ) {
+      return type
+    }
+  }
+  return ''
+}
+
+function extensionForMime(mimeType: string): string {
+  if (mimeType.includes('mp4')) return 'mp4'
+  if (mimeType.includes('ogg')) return 'ogg'
+  return 'webm'
+}
+
 function newId(): string {
   return crypto.randomUUID()
 }
@@ -22,6 +48,21 @@ function formatArgs(args: Record<string, unknown>): string {
   } catch {
     return String(args)
   }
+}
+
+/** Backend surfaces HITL pauses as tool_call_finished.error = "(Interrupt(...),)". */
+function isInterruptPayload(value: unknown): boolean {
+  if (value == null) return false
+  const text = typeof value === 'string' ? value : String(value)
+  return /\bInterrupt\s*\(/.test(text)
+}
+
+function toolFinishStatus(
+  error: unknown,
+): 'done' | 'error' | 'interrupt' {
+  if (error == null) return 'done'
+  if (isInterruptPayload(error)) return 'interrupt'
+  return 'error'
 }
 
 function dedupeActionRequests(actions: ActionRequest[]): ActionRequest[] {
@@ -280,9 +321,27 @@ export default function App() {
   const [streaming, setStreaming] = useState(false)
   const [pendingHitl, setPendingHitl] = useState<PendingHitl | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [micState, setMicState] = useState<MicState>('idle')
   const abortRef = useRef<AbortController | null>(null)
   const bottomRef = useRef<HTMLDivElement | null>(null)
   const assistantIdRef = useRef<string | null>(null)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const mediaStreamRef = useRef<MediaStream | null>(null)
+  const audioChunksRef = useRef<Blob[]>([])
+
+  const stopMediaTracks = useCallback(() => {
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop())
+    mediaStreamRef.current = null
+    mediaRecorderRef.current = null
+    audioChunksRef.current = []
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      mediaRecorderRef.current?.stop()
+      stopMediaTracks()
+    }
+  }, [stopMediaTracks])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -350,7 +409,7 @@ export default function App() {
             }
             return {
               ...tool,
-              status: chunk.error ? 'error' : 'done',
+              status: toolFinishStatus(chunk.error),
               output:
                 chunk.error != null
                   ? String(chunk.error)
@@ -527,12 +586,122 @@ export default function App() {
     [handleChunk, threadId, updateAssistant],
   )
 
+  const sendText = useCallback(
+    async (text: string) => {
+      const trimmed = text.trim()
+      if (!trimmed || streaming) return
+      setInput('')
+      setMessages((prev) => [
+        ...prev,
+        { id: newId(), role: 'user', content: trimmed },
+      ])
+      await runStream({ message: trimmed })
+    },
+    [runStream, streaming],
+  )
+
   const onSend = async () => {
-    const text = input.trim()
-    if (!text || streaming) return
-    setInput('')
-    setMessages((prev) => [...prev, { id: newId(), role: 'user', content: text }])
-    await runStream({ message: text })
+    await sendText(input)
+  }
+
+  const startRecording = async () => {
+    if (streaming || pendingHitl || micState !== 'idle') return
+    setError(null)
+
+    if (
+      typeof navigator === 'undefined' ||
+      !navigator.mediaDevices?.getUserMedia ||
+      typeof MediaRecorder === 'undefined'
+    ) {
+      setError('Microphone recording is not supported in this browser.')
+      return
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      mediaStreamRef.current = stream
+      audioChunksRef.current = []
+
+      const mimeType = pickRecorderMimeType()
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream)
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data)
+        }
+      }
+
+      recorder.onerror = () => {
+        setError('Recording failed.')
+        setMicState('idle')
+        stopMediaTracks()
+      }
+
+      mediaRecorderRef.current = recorder
+      recorder.start(250)
+      setMicState('recording')
+    } catch {
+      setError('Microphone permission denied or unavailable.')
+      stopMediaTracks()
+      setMicState('idle')
+    }
+  }
+
+  const stopRecordingAndSend = async () => {
+    const recorder = mediaRecorderRef.current
+    if (!recorder || micState !== 'recording') return
+
+    setMicState('transcribing')
+
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      recorder.onstop = () => {
+        const type = recorder.mimeType || 'audio/webm'
+        resolve(new Blob(audioChunksRef.current, { type }))
+      }
+      recorder.onerror = () => reject(new Error('Recording failed.'))
+      try {
+        recorder.stop()
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error('Recording failed.'))
+      }
+    }).catch((err: Error) => {
+      setError(err.message)
+      setMicState('idle')
+      stopMediaTracks()
+      return null
+    })
+
+    stopMediaTracks()
+    if (!blob || blob.size === 0) {
+      if (blob) setError('Recording was empty.')
+      setMicState('idle')
+      return
+    }
+
+    try {
+      const filename = `recording.${extensionForMime(blob.type)}`
+      const result = await speechToText(blob, filename)
+      const text = result.text?.trim()
+      setMicState('idle')
+      if (!text) {
+        setError('No speech detected. Try again.')
+        return
+      }
+      await sendText(text)
+    } catch (err) {
+      setError((err as Error).message || 'Speech-to-text failed')
+      setMicState('idle')
+    }
+  }
+
+  const onMicClick = () => {
+    if (micState === 'recording') {
+      void stopRecordingAndSend()
+      return
+    }
+    void startRecording()
   }
 
   const onStop = async () => {
@@ -549,6 +718,11 @@ export default function App() {
 
   const onNewChat = () => {
     abortRef.current?.abort()
+    if (mediaRecorderRef.current?.state === 'recording') {
+      mediaRecorderRef.current.stop()
+    }
+    stopMediaTracks()
+    setMicState('idle')
     setMessages([])
     setThreadId(null)
     setPendingHitl(null)
@@ -610,13 +784,19 @@ export default function App() {
         <textarea
           value={input}
           onChange={(event) => setInput(event.target.value)}
-          placeholder={
-            pendingHitl
-              ? 'Resolve tool permission above, or start a new chat…'
-              : 'Message the agent…'
-          }
           rows={2}
-          disabled={streaming || Boolean(pendingHitl)}
+          disabled={
+            streaming || Boolean(pendingHitl) || micState !== 'idle'
+          }
+          placeholder={
+            micState === 'recording'
+              ? 'Listening… click the mic to stop'
+              : micState === 'transcribing'
+                ? 'Transcribing…'
+                : pendingHitl
+                  ? 'Resolve tool permission above, or start a new chat…'
+                  : 'Message the agent…'
+          }
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault()
@@ -625,6 +805,38 @@ export default function App() {
           }}
         />
         <div className="composer-actions">
+          <button
+            type="button"
+            className={`mic-btn${micState === 'recording' ? ' mic-recording' : ''}`}
+            aria-label={
+              micState === 'recording'
+                ? 'Stop recording'
+                : micState === 'transcribing'
+                  ? 'Transcribing'
+                  : 'Start voice message'
+            }
+            aria-pressed={micState === 'recording'}
+            disabled={
+              streaming ||
+              Boolean(pendingHitl) ||
+              micState === 'transcribing'
+            }
+            onClick={onMicClick}
+          >
+            {micState === 'transcribing' ? (
+              '…'
+            ) : (
+              <svg
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                aria-hidden="true"
+                fill="currentColor"
+              >
+                <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z" />
+              </svg>
+            )}
+          </button>
           {streaming ? (
             <button type="button" className="stop-btn" onClick={() => void onStop()}>
               Stop
@@ -633,7 +845,11 @@ export default function App() {
             <button
               type="button"
               className="primary-btn"
-              disabled={!input.trim() || Boolean(pendingHitl)}
+              disabled={
+                !input.trim() ||
+                Boolean(pendingHitl) ||
+                micState !== 'idle'
+              }
               onClick={() => void onSend()}
             >
               Send

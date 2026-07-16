@@ -289,6 +289,10 @@ code {
   color: var(--danger);
 }
 
+.tool-status-interrupt {
+  color: var(--accent-deep);
+}
+
 .tool-subagent {
   margin-top: 0.35rem;
   font-size: 0.8rem;
@@ -409,13 +413,53 @@ code {
 
 .primary-btn,
 .stop-btn,
-.ghost-btn {
+.ghost-btn,
+.mic-btn {
   border: none;
   border-radius: 999px;
   padding: 0.7rem 1.15rem;
   font-weight: 600;
   cursor: pointer;
   transition: transform 120ms ease, opacity 120ms ease, background 120ms ease;
+}
+
+.mic-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.85rem;
+  height: 2.85rem;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid var(--line);
+  color: var(--ink);
+}
+
+.mic-btn:hover:not(:disabled) {
+  background: #fff;
+  transform: translateY(-1px);
+}
+
+.mic-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.mic-btn.mic-recording {
+  background: rgba(180, 35, 24, 0.12);
+  border-color: rgba(180, 35, 24, 0.35);
+  color: var(--danger);
+  animation: mic-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes mic-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(180, 35, 24, 0.25);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(180, 35, 24, 0);
+  }
 }
 
 .primary-btn {
@@ -478,10 +522,17 @@ code {
   }
 
   .composer-actions {
-    justify-content: stretch;
+    justify-content: flex-end;
   }
 
-  .composer-actions button {
-    width: 100%;
+  .composer-actions .stop-btn,
+  .composer-actions .primary-btn {
+    flex: 1;
+    width: auto;
+  }
+
+  .composer-actions .mic-btn {
+    width: 2.85rem;
+    flex: 0 0 2.85rem;
   }
 }

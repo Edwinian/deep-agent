@@ -83,3 +83,32 @@ export async function cancelStream(threadId: string): Promise<void> {
     throw new Error(detail || `Cancel failed (${response.status})`)
   }
 }
+
+export type TranscriptionResult = {
+  text: string
+  utterances?: Array<{
+    speaker: string
+    text: string
+    start?: number | null
+    end?: number | null
+  }>
+  language_code?: string | null
+  audio_duration?: number | null
+}
+
+export async function speechToText(audio: Blob, filename: string): Promise<TranscriptionResult> {
+  const form = new FormData()
+  form.append('audio', audio, filename)
+
+  const response = await fetch(`${API_BASE}/speech-to-text`, {
+    method: 'POST',
+    body: form,
+  })
+
+  if (!response.ok) {
+    const detail = await response.text()
+    throw new Error(detail || `Speech-to-text failed (${response.status})`)
+  }
+
+  return (await response.json()) as TranscriptionResult
+}

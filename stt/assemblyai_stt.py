@@ -71,11 +71,14 @@ class AssemblyAISTT:
 
         config = aai.TranscriptionConfig(
             speech_models=speech_models
-            or ["universal-3-pro", "universal-2"],
+            or ["universal-3-5-pro", "universal-2"],
             language_detection=language_detection,
             speaker_labels=speaker_labels,
         )
-        transcript = aai.Transcriber().transcribe(data, config=config)
+        try:
+            transcript = aai.Transcriber().transcribe(data, config=config)
+        except aai.types.TranscriptError as exc:
+            raise RuntimeError(f"Transcription failed: {exc}") from exc
 
         if transcript.status == aai.TranscriptStatus.error:
             raise RuntimeError(f"Transcription failed: {transcript.error}")
