@@ -15,6 +15,15 @@ You have access to two main tools:
 **CRITICAL: Use think_tool after each search to reflect on results and plan next steps**
 </Available Tools>
 
+<Search Query Rules>
+- Pass a **short factual query**, never the full research brief or instructions.
+  Good: `FIFA World Cup 2026 finalists`
+  Bad: `Research and answer this user question with up-to-date sources...`
+- For live sports, scores, elections, "who won / made it to", or anything that changes day-to-day, set `topic="news"` (or leave topic unset so the tool auto-selects news).
+- Prefer recent sources. If results look like schedules/previews instead of outcomes, search again with a narrower query (e.g. add `finalists`, `semi-final result`, today's year).
+- Trust dated news over undated FIFA schedule pages when they conflict.
+</Search Query Rules>
+
 <Instructions>
 Think like a human researcher with limited time. Follow these steps:
 

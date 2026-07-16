@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -74,13 +75,33 @@ def repair_tool_call_args(
             )
             changed = True
     elif name == "web_search_tool":
-        if not str(args.get("query") or "").strip() and user_text:
-            args["query"] = user_text
+        query = str(args.get("query") or "").strip()
+        if not query and user_text:
+            args["query"] = _search_query_from_text(user_text)
             changed = True
+        elif query:
+            repaired_query = _search_query_from_text(query)
+            if repaired_query != query:
+                args["query"] = repaired_query
+                changed = True
 
     if not changed:
         return None
     return {**tool_call, "args": args}
+
+
+def _search_query_from_text(text: str) -> str:
+    """Build a concise web search query from a user or task brief."""
+    match = re.search(r"(?im)^\s*question\s*:\s*(.+?)(?:\n|$)", text.strip())
+    if match:
+        return match.group(1).strip()
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) > 1 and any(
+        "research and answer" in line.lower() or "up-to-date sources" in line.lower()
+        for line in lines
+    ):
+        return re.sub(r"(?i)^question\s*:\s*", "", lines[-1]).strip()
+    return " ".join(text.split())
 
 
 def dedupe_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
