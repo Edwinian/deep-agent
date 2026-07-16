@@ -1,17 +1,30 @@
+'use client'
+
+import { createCrudPage, type FieldDef } from '@/components/CrudPage'
+import type { AgentRow } from '@/types'
+
+const fields: readonly FieldDef<AgentRow>[] = [
+  { name: 'id', label: 'ID', kind: 'number', hideInTable: true },
+  { name: 'name', label: 'Name', kind: 'text' },
+  { name: 'description', label: 'Description', kind: 'textarea', truncateInTable: true },
+  { name: 'system_prompt_id', label: 'System prompt ID', kind: 'number' },
+  { name: 'model', label: 'Model', kind: 'text' },
+  { name: 'subagent_ids', label: 'Subagent IDs', kind: 'list' },
+  { name: 'tool_ids', label: 'Tool IDs', kind: 'list' },
+  { name: 'skill_ids', label: 'Skill IDs', kind: 'list' },
+]
+
+// Lock CrudPage's generic to AgentRow once, so we can use it as a JSX tag.
+const AgentsCrudPage = createCrudPage<AgentRow>()
+
 export default function AgentsPage() {
   return (
-    <section className="page-pad">
-      <header className="page-header">
-        <h1>Agents</h1>
-        <p>Manage agent specs, models, tools, and subagents.</p>
-      </header>
-      <div className="placeholder-card">
-        <h2>Coming soon</h2>
-        <p>
-          Agent CRUD will live here — list agents, edit prompts, attach tools,
-          and configure subagent delegation.
-        </p>
-      </div>
-    </section>
+    <AgentsCrudPage
+      title="Agents"
+      subtitle="Manage agent specs, models, tools, and subagents."
+      endpoint="/api/agents"
+      rowName={(row) => row.name}
+      fields={fields}
+    />
   )
 }

@@ -172,3 +172,56 @@ export async function speechToText(audio: Blob, filename: string): Promise<Trans
 
   return (await response.json()) as TranscriptionResult
 }
+
+/* ---------- Generic CRUD helpers ---------- */
+
+async function parseError(response: Response, fallback: string): Promise<never> {
+  const detail = await response.text()
+  throw new Error(detail || `${fallback} (${response.status})`)
+}
+
+export async function crudGetMany<T>(endpoint: string): Promise<T[]> {
+  const response = await fetch(`${API_BASE}${endpoint}`)
+  if (!response.ok) await parseError(response, 'Failed to load')
+  return (await response.json()) as T[]
+}
+
+export async function crudGetOne<T>(endpoint: string, id: number): Promise<T> {
+  const response = await fetch(`${API_BASE}${endpoint}/${id}`)
+  if (!response.ok) await parseError(response, 'Failed to load')
+  return (await response.json()) as T
+}
+
+export async function crudCreate<T>(
+  endpoint: string,
+  payload: Record<string, unknown>,
+): Promise<T> {
+  const response = await fetch(`${API_BASE}${endpoint}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) await parseError(response, 'Failed to create')
+  return (await response.json()) as T
+}
+
+export async function crudUpdate<T>(
+  endpoint: string,
+  id: number,
+  payload: Record<string, unknown>,
+): Promise<T> {
+  const response = await fetch(`${API_BASE}${endpoint}/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) await parseError(response, 'Failed to update')
+  return (await response.json()) as T
+}
+
+export async function crudDelete(endpoint: string, id: number): Promise<void> {
+  const response = await fetch(`${API_BASE}${endpoint}/${id}`, { method: 'DELETE' })
+  if (!response.ok && response.status !== 404) {
+    await parseError(response, 'Failed to delete')
+  }
+}

@@ -1,17 +1,24 @@
+'use client'
+
+import { createCrudPage, type FieldDef } from '@/components/CrudPage'
+import type { SystemPromptRow } from '@/types'
+
+const fields: readonly FieldDef<SystemPromptRow>[] = [
+  { name: 'id', label: 'ID', kind: 'number', hideInTable: true },
+  { name: 'name', label: 'Name', kind: 'text' },
+  { name: 'content', label: 'Content', kind: 'textarea', hideInTable: true },
+]
+
+const SystemPromptsCrudPage = createCrudPage<SystemPromptRow>()
+
 export default function SystemPromptsPage() {
   return (
-    <section className="page-pad">
-      <header className="page-header">
-        <h1>System Prompts</h1>
-        <p>Edit instruction templates shared across agents.</p>
-      </header>
-      <div className="placeholder-card">
-        <h2>Coming soon</h2>
-        <p>
-          A prompt library editor will live here — version, preview, and reuse
-          system prompt fragments across agents.
-        </p>
-      </div>
-    </section>
+    <SystemPromptsCrudPage
+      title="System Prompts"
+      subtitle="Edit instruction templates shared across agents."
+      endpoint="/api/system-prompts"
+      rowName={(row) => row.name}
+      fields={fields}
+    />
   )
 }

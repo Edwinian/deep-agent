@@ -117,3 +117,51 @@ export type ThreadHistoryResponse = {
   action_requests?: ActionRequest[] | null
   interrupt_ids?: string[] | null
 }
+
+/* ---------- CRUD types for Agents / SystemPrompts / Skills ---------- */
+
+export type BaseRow = {
+  id: number
+  created_at: string
+  updated_at: string | null
+  deleted_at: string | null
+}
+
+export type AgentRow = BaseRow & {
+  name: string
+  description: string
+  system_prompt_id: number
+  subagent_ids: number[] | null
+  model: string | null
+  tool_ids: number[] | null
+  skill_ids: number[] | null
+}
+
+export type SystemPromptRow = BaseRow & {
+  name: string
+  content: string
+}
+
+export type SkillRow = BaseRow & {
+  name: string
+  description: string
+  content: string
+}
+
+export type AgentCreate = {
+  name: string
+  description: string
+  system_prompt_id: number
+  subagent_ids?: number[] | null
+  model?: string | null
+  tool_ids?: number[] | null
+  skill_ids?: number[] | null
+}
+
+export type AgentUpdate = Partial<AgentCreate>
+
+export type SystemPromptCreate = { name: string; content: string }
+export type SystemPromptUpdate = Partial<SystemPromptCreate>
+
+export type SkillCreate = { name: string; description: string; content: string }
+export type SkillUpdate = Partial<SkillCreate>

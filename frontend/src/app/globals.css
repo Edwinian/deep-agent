@@ -962,3 +962,325 @@ code {
     display: none;
   }
 }
+
+/* ---------- CRUD page (table + modal + drawer) ---------- */
+
+.crud-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.crud-topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.crud-topbar .page-header {
+  margin: 0;
+}
+
+.crud-muted {
+  margin: 0;
+  color: var(--muted);
+  padding: 1rem 0;
+}
+
+.crud-table-wrap {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  backdrop-filter: blur(10px);
+  box-shadow: var(--shadow);
+  overflow: auto;
+}
+
+.crud-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+.crud-table thead th {
+  text-align: left;
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.6);
+  position: sticky;
+  top: 0;
+}
+
+.crud-th-actions {
+  width: 6rem;
+}
+
+.crud-table tbody td {
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+  max-width: 24rem;
+}
+
+.crud-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.crud-row {
+  cursor: pointer;
+  transition: background 100ms ease;
+}
+
+.crud-row:hover {
+  background: rgba(15, 118, 110, 0.05);
+}
+
+.crud-cell-truncate {
+  max-width: 22rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.crud-td-actions {
+  text-align: right;
+}
+
+.crud-delete-btn {
+  border: 1px solid rgba(180, 35, 24, 0.3);
+  background: rgba(180, 35, 24, 0.06);
+  color: var(--danger);
+  border-radius: 999px;
+  padding: 0.3rem 0.75rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.crud-delete-btn:hover {
+  background: rgba(180, 35, 24, 0.16);
+}
+
+/* Shared overlay shell for modal + drawer */
+
+.crud-modal-root,
+.crud-drawer-root {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+}
+
+.crud-modal-backdrop,
+.crud-drawer-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+}
+
+/* Modal (centered card) */
+
+.crud-modal {
+  position: relative;
+  z-index: 1;
+  margin: 8vh auto 0;
+  width: min(36rem, calc(100vw - 2rem));
+  max-height: 80vh;
+  overflow: auto;
+  background: #fff;
+  color: var(--ink);
+  border-radius: var(--radius);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  animation: crud-modal-in 160ms ease-out;
+}
+
+.crud-modal-sm {
+  width: min(24rem, calc(100vw - 2rem));
+}
+
+@keyframes crud-modal-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.crud-modal-header h3,
+.crud-modal h3 {
+  margin: 0;
+  font-family: 'Outfit', sans-serif;
+  font-size: 1.15rem;
+}
+
+.crud-modal p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.crud-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.danger-btn {
+  border: none;
+  border-radius: 999px;
+  padding: 0.7rem 1.15rem;
+  background: var(--danger);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 120ms ease;
+}
+
+.danger-btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.danger-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Form fields (shared by create modal + edit drawer) */
+
+.crud-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.crud-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.crud-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.crud-input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--ink);
+  padding: 0.6rem 0.75rem;
+  font: inherit;
+  font-size: 0.95rem;
+}
+
+.crud-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.15);
+}
+
+.crud-input:disabled {
+  opacity: 0.6;
+}
+
+textarea.crud-input {
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+/* Right drawer */
+
+.crud-drawer {
+  position: relative;
+  z-index: 1;
+  margin-left: auto;
+  width: min(30rem, 100vw);
+  height: 100%;
+  background: #fff;
+  color: var(--ink);
+  display: flex;
+  flex-direction: column;
+  box-shadow: -12px 0 40px rgba(0, 0, 0, 0.25);
+  animation: crud-drawer-in 180ms ease-out;
+}
+
+@keyframes crud-drawer-in {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+}
+
+.crud-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.1rem 1.25rem 0.85rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.crud-drawer-header h3 {
+  margin: 0;
+  font-family: 'Outfit', sans-serif;
+  font-size: 1.1rem;
+}
+
+.crud-drawer-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border: 0;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--muted);
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.crud-drawer-close:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--ink);
+}
+
+.crud-drawer .crud-form {
+  padding: 1.25rem;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.crud-drawer-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 1rem 1.25rem;
+  border-top: 1px solid var(--line);
+}
+
+@media (max-width: 640px) {
+  .crud-drawer {
+    width: 100vw;
+  }
+  .crud-modal {
+    margin-top: 4vh;
+  }
+}
