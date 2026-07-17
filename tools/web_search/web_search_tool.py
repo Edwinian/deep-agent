@@ -6,12 +6,14 @@ import logging
 import os
 import re
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
 from dotenv import load_dotenv
+from langchain.tools import ToolRuntime
 from langchain_core.tools import InjectedToolArg, InjectedToolCallId, tool
 from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
@@ -323,7 +325,11 @@ def _is_low_value_content(text: str) -> bool:
     return any(marker in lowered for marker in _JS_ERROR_MARKERS)
 
 
-def process_search_results(results: dict) -> list[dict]:
+def process_search_results(
+    results: dict,
+    *,
+    on_status: Callable[[str], None] | None = None,
+) -> list[dict]:
     """Process search results into file-ready records with raw content.
 
     Prefers Tavily-extracted content (raw_content/content) over re-fetching URLs.
@@ -332,10 +338,14 @@ def process_search_results(results: dict) -> list[dict]:
 
     Args:
         results: Tavily search results dictionary
+        on_status: Optional callback for client-visible progress (summarizing)
 
     Returns:
         List of processed results with filenames and raw content
     """
+    if on_status is not None:
+        on_status("Summarizing search results…")
+
     processed_results = []
 
     with httpx.Client(timeout=30.0, follow_redirects=True) as client:
@@ -417,6 +427,7 @@ def web_search_tool(
     query: str,
     state: Annotated[dict[str, Any], InjectedState],
     tool_call_id: Annotated[str, InjectedToolCallId],
+    runtime: ToolRuntime,
     max_results: Annotated[int, InjectedToolArg] = 5,
     topic: Annotated[
         Literal["general", "news", "finance"] | None,
@@ -437,6 +448,7 @@ def web_search_tool(
             user's factual question, e.g. "FIFA World Cup 2026 finalists".
         state: Injected agent state for file storage
         tool_call_id: Injected tool call identifier
+        runtime: Injected tool runtime for streaming progress to the client
         max_results: Maximum number of results to return (default: 5)
         topic: Topic filter - 'general', 'news', or 'finance'. Leave unset to
             auto-select 'news' for current-events / sports / live-result queries.
@@ -452,7 +464,11 @@ def web_search_tool(
     # Bias the engine toward today's facts without replacing the user query.
     dated_query = f"{search_query} (as of {get_today_str()})"
 
+    def _status(message: str) -> None:
+        runtime.emit_output_delta(message)
+
     try:
+        _status(f'Searching the web for "{search_query}"…')
         search_results = run_tavily_search(
             dated_query,
             max_results=max_results,
@@ -462,7 +478,10 @@ def web_search_tool(
             include_answer=True,
             include_favicon=True,
         )
-        processed_results = process_search_results(search_results)
+        processed_results = process_search_results(
+            search_results,
+            on_status=_status,
+        )
     except Exception as exc:
         error_text = _format_tavily_error(exc)
         logger.error("web_search_tool failed for query=%r: %s", search_query, error_text)

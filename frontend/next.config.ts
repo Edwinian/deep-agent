@@ -6,8 +6,13 @@ const nextConfig: NextConfig = {
   reactStrictMode: true,
   // Hide the bottom-left Next.js dev indicator widget.
   devIndicators: false,
+  // Compression buffers responses and breaks SSE when proxied through rewrites.
+  compress: false,
   // Proxy API endpoints from the browser (port 5173) to the FastAPI backend
-  // so the frontend and API share an origin.
+  // so the frontend and API share an origin for non-streaming CRUD.
+  //
+  // Stream/cancel intentionally bypass these rewrites (see `STREAM_API_BASE`
+  // in `src/api.ts`) because Next.js rewrites buffer `text/event-stream`.
   //
   // Two flavours of proxy:
   //   * /chats/* and /speech-to-text/* — legacy paths the chat client still

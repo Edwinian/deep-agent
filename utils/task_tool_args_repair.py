@@ -52,13 +52,39 @@ def last_user_text(state_or_messages: Any) -> str:
     return ""
 
 
+_USER_REQUEST_PATH = "/user_request.txt"
+
+
+def _default_research_todos(user_text: str) -> list[dict[str, str]]:
+    """Build a minimal research plan when the model omits write_todos args."""
+    topic = " ".join(user_text.split()) if user_text else "the user request"
+    return [
+        {
+            "content": f"Save the user request about {topic} to the filesystem",
+            "status": "in_progress",
+        },
+        {
+            "content": f"Research up-to-date information about {topic}",
+            "status": "pending",
+        },
+        {
+            "content": "Compile findings into a concise response",
+            "status": "pending",
+        },
+    ]
+
+
 def repair_tool_call_args(
     tool_call: dict[str, Any],
     *,
     user_text: str,
     default_subagent_type: str = str(AgentName.RESEARCH_AGENT),
 ) -> dict[str, Any] | None:
-    """Return a repaired tool_call dict, or None if unchanged."""
+    """Return a repaired tool_call dict, or None if unchanged.
+
+    Grok often emits the correct tool name with empty ``args``. Fill required
+    fields with safe defaults so validation does not fail in a retry loop.
+    """
     name = tool_call.get("name")
     args = dict(tool_call.get("args") or {})
     changed = False
@@ -85,6 +111,22 @@ def repair_tool_call_args(
             if repaired_query != query:
                 args["query"] = repaired_query
                 changed = True
+    elif name == "ls":
+        if not str(args.get("path") or "").strip():
+            args["path"] = "/"
+            changed = True
+    elif name == "write_file":
+        if not str(args.get("file_path") or "").strip():
+            args["file_path"] = _USER_REQUEST_PATH
+            changed = True
+        if not str(args.get("content") or "").strip() and user_text:
+            args["content"] = user_text
+            changed = True
+    elif name == "write_todos":
+        todos = args.get("todos")
+        if not isinstance(todos, list) or not todos:
+            args["todos"] = _default_research_todos(user_text)
+            changed = True
 
     if not changed:
         return None

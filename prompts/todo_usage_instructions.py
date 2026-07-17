@@ -11,4 +11,6 @@ IMPORTANT: Always create a research plan of TODOs for any user request. Your pla
 - A task to save the user request to the file system for reference
 - One or more research tasks (batch closely related searches into a single TODO)
 - A final task to compile findings into a comprehensive response
+
+Never call write_todos with empty arguments — always pass a non-empty todos list with content and status.
 """

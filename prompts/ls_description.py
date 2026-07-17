@@ -4,4 +4,7 @@ LS_DESCRIPTION = """List all files in the virtual filesystem stored in agent sta
 
 Shows what files currently exist in agent memory. Use this to orient yourself before other file operations and maintain awareness of your file organization.
 
-No parameters required - simply call ls() to see all available files."""
+Parameters:
+- path (required): Absolute directory path to list. Use "/" for the virtual filesystem root.
+
+Example: ls(path="/")"""

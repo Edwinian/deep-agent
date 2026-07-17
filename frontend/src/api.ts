@@ -1,6 +1,16 @@
 import type { Permission, StreamChunk, ThreadHistoryResponse } from './types'
 
+/** Same-origin base for CRUD (proxied by Next.js rewrites). */
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? ''
+
+/**
+ * SSE must hit FastAPI directly. Next.js rewrites buffer `text/event-stream`
+ * until the upstream finishes, so the UI only sees a burst at the end.
+ */
+const STREAM_API_BASE =
+  process.env.NEXT_PUBLIC_STREAM_API_BASE_URL ??
+  process.env.NEXT_PUBLIC_BACKEND_API_BASE_URL ??
+  'http://127.0.0.1:8000'
 
 export type StreamRequest = {
   agentId: number
@@ -9,6 +19,22 @@ export type StreamRequest = {
   permissions?: Permission[]
   signal?: AbortSignal
   onChunk: (chunk: StreamChunk) => void
+}
+
+function emitSseFrames(buffer: string, onChunk: (chunk: StreamChunk) => void): string {
+  // SSE events are delimited by a blank line.
+  const parts = buffer.split('\n\n')
+  const rest = parts.pop() ?? ''
+  for (const frame of parts) {
+    for (const line of frame.split('\n')) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith('data:')) continue
+      const payload = trimmed.slice(5).trim()
+      if (!payload || payload === '[DONE]') continue
+      onChunk(JSON.parse(payload) as StreamChunk)
+    }
+  }
+  return rest
 }
 
 export async function streamAgent({
@@ -29,11 +55,12 @@ export async function streamAgent({
     body.message = message
   }
 
-  const response = await fetch(`${API_BASE}/chats/stream`, {
+  const response = await fetch(`${STREAM_API_BASE}/chats/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
     body: JSON.stringify(body),
     signal,
+    cache: 'no-store',
   })
 
   if (!response.ok) {
@@ -51,32 +78,20 @@ export async function streamAgent({
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (!trimmed.startsWith('data:')) continue
-      const payload = trimmed.slice(5).trim()
-      if (!payload || payload === '[DONE]') continue
-      onChunk(JSON.parse(payload) as StreamChunk)
-    }
+    buffer = emitSseFrames(buffer + decoder.decode(value, { stream: true }), onChunk)
   }
 
-  const leftover = buffer.trim()
-  if (leftover.startsWith('data:')) {
-    const payload = leftover.slice(5).trim()
-    if (payload && payload !== '[DONE]') {
-      onChunk(JSON.parse(payload) as StreamChunk)
-    }
+  buffer = emitSseFrames(buffer + decoder.decode(), onChunk)
+  if (buffer.trim()) {
+    // Final partial frame (no trailing blank line).
+    emitSseFrames(`${buffer}\n\n`, onChunk)
   }
 }
 
 export async function cancelStream(threadId: string): Promise<void> {
   const response = await fetch(
-    `${API_BASE}/chats/cancel-stream/${encodeURIComponent(threadId)}`,
-    { method: 'POST' },
+    `${STREAM_API_BASE}/chats/cancel-stream/${encodeURIComponent(threadId)}`,
+    { method: 'POST', cache: 'no-store' },
   )
   if (!response.ok && response.status !== 404) {
     const detail = await response.text()

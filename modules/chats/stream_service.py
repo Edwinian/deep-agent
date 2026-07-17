@@ -520,7 +520,13 @@ class StreamService:
         subagent_cause: dict[str, Any] | None = None,
         seen_system_status: set[str] | None = None,
     ) -> AsyncIterator[str]:
-        """Stream one ``run.messages`` handle: text, reasoning, and tool-call chunks."""
+        """Stream one ``run.messages`` handle: text, reasoning, and tool-call chunks.
+
+        ``message.text``, ``message.reasoning``, and ``message.tool_calls`` share one
+        graph pump. Iterating them sequentially waits for each projection to finish
+        before the next starts, so tokens only reach the client after the full LLM
+        turn. Merge the three projections so deltas are yielded as they arrive.
+        """
         node = getattr(message, "node", None)
         message_id = getattr(message, "message_id", None)
         resolved_node = node if isinstance(node, str) else None
@@ -535,71 +541,81 @@ class StreamService:
             "message_id": resolved_message_id,
         }
 
+        # Immediate status so the UI is not blank while the model starts.
+        status_key = f"{resolved_message_id or 'message'}:{_THINKING_STATUS}"
+        if seen_system_status is not None:
+            line = self.emit_system_status_once(
+                seen_system_status,
+                status_key,
+                content=_THINKING_STATUS,
+                thread_id=thread_id,
+                agent_id=agent_id,
+                source=source,
+                subagent_name=subagent_name,
+                subagent_cause=subagent_cause,
+                node=resolved_node,
+                message_id=resolved_message_id,
+            )
+            if line:
+                yield line
+        else:
+            yield self.emit_system_status(
+                content=_THINKING_STATUS,
+                thread_id=thread_id,
+                agent_id=agent_id,
+                source=source,
+                subagent_name=subagent_name,
+                subagent_cause=subagent_cause,
+                node=resolved_node,
+                message_id=resolved_message_id,
+            )
+
         streamed_reasoning = ""
-        async for delta in message.reasoning:
-            if not delta:
-                continue
-            delta_text = str(delta)
-            streamed_reasoning += delta_text
-            yield self.emit_stream_chunk(
-                StreamTextChunk(
-                    **common,
-                    kind=StreamMessageKind.REASONING,
-                    delta=delta_text,
-                )
-            )
-
         streamed_answer_text = ""
-        async for delta in message.text:
-            if not delta:
+
+        async for name, item in self.merge_projection_feeds(
+            {
+                "reasoning": message.reasoning.__aiter__,
+                "text": message.text.__aiter__,
+                "tool_calls": message.tool_calls.__aiter__,
+            }
+        ):
+            if name == "reasoning":
+                if not item:
+                    continue
+                delta_text = str(item)
+                streamed_reasoning += delta_text
+                yield self.emit_stream_chunk(
+                    StreamTextChunk(
+                        **common,
+                        kind=StreamMessageKind.REASONING,
+                        delta=delta_text,
+                    )
+                )
                 continue
-            delta_text = str(delta)
-            streamed_answer_text += delta_text
-            yield self.emit_stream_chunk(
-                StreamTextChunk(
-                    **common,
-                    kind=StreamMessageKind.TEXT,
-                    delta=delta_text,
-                )
-            )
 
-        if not streamed_reasoning and not streamed_answer_text:
-            status_key = f"{resolved_message_id or 'message'}:{_THINKING_STATUS}"
-            if seen_system_status is not None:
-                line = self.emit_system_status_once(
-                    seen_system_status,
-                    status_key,
-                    content=_THINKING_STATUS,
-                    thread_id=thread_id,
-                    agent_id=agent_id,
-                    source=source,
-                    subagent_name=subagent_name,
-                    subagent_cause=subagent_cause,
-                    node=resolved_node,
-                    message_id=resolved_message_id,
+            if name == "text":
+                if not item:
+                    continue
+                delta_text = str(item)
+                streamed_answer_text += delta_text
+                yield self.emit_stream_chunk(
+                    StreamTextChunk(
+                        **common,
+                        kind=StreamMessageKind.TEXT,
+                        delta=delta_text,
+                    )
                 )
-                if line:
-                    yield line
-            else:
-                yield self.emit_system_status(
-                    content=_THINKING_STATUS,
-                    thread_id=thread_id,
-                    agent_id=agent_id,
-                    source=source,
-                    subagent_name=subagent_name,
-                    subagent_cause=subagent_cause,
-                    node=resolved_node,
-                    message_id=resolved_message_id,
-                )
+                continue
 
-        async for tool_call_chunk in message.tool_calls:
-            yield self.emit_stream_chunk(
-                StreamTextChunk(
-                    **common,
-                    kind=StreamMessageKind.MESSAGE_TOOL_CALL_CHUNK,
-                    tool_call_chunk=self.normalize_tool_call_chunk(tool_call_chunk),
+            if name == "tool_calls":
+                yield self.emit_stream_chunk(
+                    StreamTextChunk(
+                        **common,
+                        kind=StreamMessageKind.MESSAGE_TOOL_CALL_CHUNK,
+                        tool_call_chunk=self.normalize_tool_call_chunk(item),
+                    )
                 )
-            )
 
         get_finalized = getattr(message.tool_calls, "get", None)
         if get_finalized is not None:
@@ -620,12 +636,12 @@ class StreamService:
                     label = ", ".join(tool_names)
                     planning_content = f"Planning tool use: {label}…"
                     if seen_system_status is not None:
-                        status_key = (
+                        planning_key = (
                             f"{resolved_message_id or 'message'}:planning:{label}"
                         )
                         line = self.emit_system_status_once(
                             seen_system_status,
-                            status_key,
+                            planning_key,
                             content=planning_content,
                             thread_id=thread_id,
                             agent_id=agent_id,
@@ -656,8 +672,12 @@ class StreamService:
                 )
             )
 
-        full_text = str(await message.text)
-        full_reasoning = str(await message.reasoning)
+        full_text_value = await message.text
+        full_reasoning_value = await message.reasoning
+        full_text = "" if full_text_value is None else str(full_text_value)
+        full_reasoning = (
+            "" if full_reasoning_value is None else str(full_reasoning_value)
+        )
 
         if len(streamed_answer_text) < len(full_text):
             remainder = full_text[len(streamed_answer_text) :]
@@ -1192,18 +1212,27 @@ class StreamService:
         )
 
         return StreamingResponse(
-            self.stream_agent_content(
-                agent,
-                thread_id=thread_id,
-                agent_id=agent_id,
-                config=config,
-                input_state=input_state,
-                access_token=access_token,
+            self._flushing_sse(
+                self.stream_agent_content(
+                    agent,
+                    thread_id=thread_id,
+                    agent_id=agent_id,
+                    config=config,
+                    input_state=input_state,
+                    access_token=access_token,
+                )
             ),
             media_type="text/event-stream",
             headers={
-                "Cache-Control": "no-cache",
+                "Cache-Control": "no-cache, no-transform",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
+                "Content-Encoding": "none",
             },
         )
+
+    async def _flushing_sse(self, frames: AsyncIterator[str]) -> AsyncIterator[str]:
+        """Yield each SSE frame, then yield to the event loop so ASGI can flush."""
+        async for frame in frames:
+            yield frame
+            await asyncio.sleep(0)

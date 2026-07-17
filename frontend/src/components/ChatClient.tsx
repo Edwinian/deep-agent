@@ -546,7 +546,7 @@ function ThinkingBlock({
   streaming?: boolean
 }) {
   return (
-    <details className="collapsible" open={streaming || undefined}>
+    <details className="collapsible" open={Boolean(streaming)}>
       <summary>
         Thinking
         {streaming ? <span className="collapsible-live">live</span> : null}
@@ -565,7 +565,7 @@ function ToolEventBlock({ tool }: { tool: ToolEvent }) {
     <details
       key={running ? `${tool.id}-live` : tool.id}
       className={`collapsible tool-event tool-${tool.status}`}
-      open={running || undefined}
+      open={running}
     >
       <summary>
         <span className="tool-summary-name">{formatToolLabel(tool.name)}</span>
@@ -983,6 +983,13 @@ export default function ChatClient() {
           ...message,
           tools: [...(message.tools ?? []), tool],
         }))
+        return
+      }
+
+      if (chunk.kind === 'tool_call_output_delta' && chunk.delta) {
+        const status = String(chunk.delta).trim()
+        if (!status) return
+        updateAssistant((message) => appendStreamStatus(message, status))
         return
       }
 
