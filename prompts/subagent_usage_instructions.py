@@ -15,14 +15,20 @@ Do not answer time-sensitive or factual questions from memory alone when a sub-a
 </Task>
 
 <When to delegate>
-Always call **task** with `subagent_type="{AgentName.RESEARCH_AGENT}"` for:
+**RAG first (vector store)** — call **task** with `subagent_type="{AgentName.RAG_AGENT}"` when ANY of these apply:
+- The user mentions vector DB, vector database, ChromaDB, Chroma, indexed documents, or retrieval from stored docs
+- The user asks to look up content that may already be indexed (e.g. Lilian Weng blog posts on reward hacking, hallucination, diffusion video)
+- The question is about facts from pre-indexed corpora, not live web news
+
+For RAG tasks, pass the user's question verbatim in `description`. The rag_agent will call **retrieve_tool** (not web search).
+**Never** delegate these to `{AgentName.RESEARCH_AGENT}` — research_agent uses web_search_tool, which is wrong for vector-DB lookups.
+
+**Web research** — call **task** with `subagent_type="{AgentName.RESEARCH_AGENT}"` only for:
 - Current events, news, sports results, elections, markets, weather beyond tool answers
 - Anything that depends on what is true **as of today's date**
-- Questions where your parametric knowledge might be stale or incomplete
+- Live web facts with no mention of vector DB / indexed documents
 
-Use `subagent_type="{AgentName.RAG_AGENT}"` when the user asks about indexed / vector-DB / Chroma documents.
-
-Do **not** confidently invent outcomes for ongoing or recent events. If unsure, research.
+Do **not** confidently invent outcomes for ongoing or recent events. If unsure and the user did not ask for vector DB lookup, research.
 </When to delegate>
 
 <Available Tools>
@@ -30,7 +36,12 @@ Do **not** confidently invent outcomes for ongoing or recent events. If unsure, 
    - BOTH arguments are required on every call. Never call task with empty args.
    - description: Clear, specific research question or task (standalone; include expected output)
    - subagent_type: Type of agent to use (e.g., "{AgentName.RESEARCH_AGENT}", "{AgentName.RAG_AGENT}")
-   - Correct example:
+   - RAG example (vector DB / indexed docs):
+     task(
+       description="What does Lilian Weng say about types of reward hacking? Answer by looking up on vector DB.",
+       subagent_type="{AgentName.RAG_AGENT}"
+     )
+   - Web research example:
      task(
        description="Which teams reached the FIFA World Cup 2026 final? Return team names only.",
        subagent_type="{AgentName.RESEARCH_AGENT}"

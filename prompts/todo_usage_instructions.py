@@ -7,10 +7,12 @@ TODO_USAGE_INSTRUCTIONS = """Based upon the user's request:
 4. Mark you task as completed, and proceed to the next TODO.
 5. Continue this process until you have completed all TODOs.
 
-IMPORTANT: Always create a research plan of TODOs for any user request. Your plan should always include:
+IMPORTANT: Create a TODO plan for multi-step requests. Your plan should include:
 - A task to save the user request to the file system for reference
-- One or more research tasks (batch closely related searches into a single TODO)
+- One or more delegation tasks (rag_agent for vector DB / indexed docs; research_agent for live web)
 - A final task to compile findings into a comprehensive response
+
+**Skip TODOs** for a single short vector-DB or web lookup — save the request and delegate immediately.
 
 Never call write_todos with empty arguments — always pass a non-empty todos list with content and status.
 """

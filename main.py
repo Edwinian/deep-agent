@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
+import logging
+
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
+
+logging.basicConfig(level=logging.INFO)
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

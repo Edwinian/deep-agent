@@ -328,7 +328,7 @@ def _migrate_rag_agent(conn: sqlite3.Connection) -> None:
     from agents.ids import GENERAL_AGENT_ID, RAG_AGENT_ID
     from constants.agent_name import AgentName
     from constants.model_name import ModelName
-    from db.seed_agents import _build_rag_system_prompt
+    from db.seed_agents import RAG_AGENT_DESCRIPTION, _build_rag_system_prompt
 
     RAG_SYSTEM_PROMPT_ID = 3
     RETRIEVE_TOOL_ID = 2008
@@ -366,11 +366,7 @@ def _migrate_rag_agent(conn: sqlite3.Connection) -> None:
             (
                 RAG_AGENT_ID,
                 AgentName.RAG_AGENT,
-                (
-                    "Delegate questions that need grounded answers from indexed "
-                    "documents in the ChromaDB vector store. Use when the user asks "
-                    "about content that may already be indexed rather than live web data."
-                ),
+                RAG_AGENT_DESCRIPTION,
                 RAG_SYSTEM_PROMPT_ID,
                 None,
                 ModelName.GROK_4_3.with_provider(),
@@ -396,6 +392,24 @@ def _migrate_rag_agent(conn: sqlite3.Connection) -> None:
             "UPDATE Agent SET subagent_ids = ? WHERE id = ?",
             (json.dumps(subagent_ids), GENERAL_AGENT_ID),
         )
+
+
+def _migrate_rag_agent_description(conn: sqlite3.Connection) -> None:
+    """Refresh rag_agent description shown in the task tool's available agents list."""
+    from datetime import datetime, timezone
+
+    from agents.ids import RAG_AGENT_ID
+    from db.seed_agents import RAG_AGENT_DESCRIPTION
+
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        UPDATE Agent
+        SET description = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (RAG_AGENT_DESCRIPTION, now, RAG_AGENT_ID),
+    )
 
 
 def _migrate_agent_names(conn: sqlite3.Connection) -> None:
@@ -573,6 +587,7 @@ def init_agent_db(conn_string: str | None = None) -> None:
         _migrate_generate_answer_prompt(conn)
         _migrate_rag_tool_prompts(conn)
         _migrate_general_agent_prompt(conn)
+        _migrate_rag_agent_description(conn)
         conn.commit()
 
         count = conn.execute("SELECT COUNT(*) FROM Agent").fetchone()[0]

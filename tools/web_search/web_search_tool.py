@@ -7,6 +7,7 @@ import os
 import re
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from typing import Any
 import httpx
 from dotenv import load_dotenv
 from langchain.tools import ToolRuntime
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import InjectedToolArg, InjectedToolCallId, tool
 from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
@@ -197,6 +199,28 @@ _CURRENT_EVENTS_MARKERS = (
     "breaking",
 )
 
+_COMPLEX_QUERY_MARKERS = (
+    "compare",
+    "versus",
+    " vs ",
+    "difference between",
+    "pros and cons",
+    "advantages and disadvantages",
+    "step by step",
+    "how to",
+    "analyze",
+    "analysis",
+    "history of",
+    "timeline",
+    "research ",
+)
+
+SUMMARIZE_CHAR_THRESHOLD = 2500
+MAX_WEB_SEARCHES_SIMPLE = 2
+MAX_WEB_SEARCHES_NORMAL = 3
+MAX_WEB_SEARCHES_COMPLEX = 5
+_SIMPLE_QUERY_MAX_WORDS = 15
+
 
 def _extract_question_from_brief(text: str) -> str:
     """Prefer an explicit Question: line over a full research task brief."""
@@ -226,6 +250,69 @@ def _prefers_news_topic(query: str) -> bool:
     """Heuristic: current-events / sports / live-results queries need news."""
     lowered = query.lower()
     return any(marker in lowered for marker in _CURRENT_EVENTS_MARKERS)
+
+
+def _is_simple_query(query: str) -> bool:
+    """True for short single-topic questions that need at most 1–2 searches."""
+    normalized = normalize_search_query(query)
+    if not normalized:
+        return False
+    if len(normalized.split()) > _SIMPLE_QUERY_MAX_WORDS:
+        return False
+    lowered = normalized.lower()
+    if any(marker in lowered for marker in _COMPLEX_QUERY_MARKERS):
+        return False
+    return normalized.count("?") <= 1
+
+
+def _max_web_searches_for_query(query: str) -> int:
+    """Return enforced web_search_tool budget for this query."""
+    normalized = normalize_search_query(query)
+    if _is_simple_query(normalized):
+        if _prefers_news_topic(normalized):
+            return 1
+        return MAX_WEB_SEARCHES_SIMPLE
+    lowered = normalized.lower()
+    if any(marker in lowered for marker in _COMPLEX_QUERY_MARKERS) or len(
+        normalized.split()
+    ) > 25:
+        return MAX_WEB_SEARCHES_COMPLEX
+    return MAX_WEB_SEARCHES_NORMAL
+
+
+def _count_prior_web_searches(messages: list[Any] | None) -> int:
+    """Count successful prior web_search_tool calls in agent message history."""
+    count = 0
+    for message in messages or []:
+        if isinstance(message, ToolMessage) and str(message.name or "") == "web_search_tool":
+            if str(message.content or "").strip():
+                count += 1
+    return count
+
+
+def _tavily_search_options(
+    topic: Literal["general", "news", "finance"],
+    *,
+    is_simple: bool,
+) -> dict[str, Any]:
+    """Pick faster Tavily settings for news and simple queries."""
+    if topic == "news":
+        return {
+            "search_depth": "fast",
+            "include_raw_content": False,
+            "include_answer": True,
+        }
+    if is_simple:
+        return {
+            "search_depth": "basic",
+            "include_raw_content": False,
+            "include_answer": True,
+        }
+    return {
+        "search_depth": "advanced",
+        "include_raw_content": True,
+        "include_answer": True,
+    }
 
 
 def run_tavily_search(
@@ -288,6 +375,34 @@ def _filename_from_title(title: str) -> str:
     return f"{slug[:60] or 'search_result'}.md"
 
 
+def _snippet_summary(text: str, *, max_len: int = 500) -> str:
+    """Return a compact preview without calling the summarizer LLM."""
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= max_len:
+        return cleaned
+    truncated = cleaned[:max_len].rsplit(" ", 1)[0]
+    return f"{truncated}..."
+
+
+def _needs_llm_summarize(content: str) -> bool:
+    """Only summarize very large page bodies; snippets are enough otherwise."""
+    return len(content) > SUMMARIZE_CHAR_THRESHOLD
+
+
+def _summary_from_snippet(
+    raw_content: str,
+    *,
+    title: str,
+    tavily_snippet: str,
+) -> Summary:
+    """Build a Summary from Tavily snippet / short content (no LLM)."""
+    preview_source = (tavily_snippet or raw_content).strip()
+    return Summary(
+        filename=_normalize_virtual_path(_filename_from_title(title)),
+        summary=_snippet_summary(preview_source),
+    )
+
+
 def summarize_webpage_content(webpage_content: str, *, title: str = "") -> Summary:
     """Summarize webpage content using summarize."""
     try:
@@ -325,6 +440,30 @@ def _is_low_value_content(text: str) -> bool:
     return any(marker in lowered for marker in _JS_ERROR_MARKERS)
 
 
+def _fetch_result_content(result: dict, *, client: httpx.Client) -> str:
+    """Resolve the best available text for one Tavily hit."""
+    url = result["url"]
+    tavily_content = _tavily_result_content(result)
+    if tavily_content and not _is_low_value_content(tavily_content):
+        return tavily_content
+
+    try:
+        response = client.get(url)
+        if response.status_code == 200:
+            fetched = markdownify(response.text)
+            if not _is_low_value_content(fetched):
+                return fetched
+            if tavily_content:
+                return tavily_content
+        elif tavily_content:
+            return tavily_content
+    except (httpx.TimeoutException, httpx.RequestError):
+        if tavily_content:
+            return tavily_content
+
+    return result.get("content", "No content available.")
+
+
 def process_search_results(
     results: dict,
     *,
@@ -332,69 +471,94 @@ def process_search_results(
 ) -> list[dict]:
     """Process search results into file-ready records with raw content.
 
-    Prefers Tavily-extracted content (raw_content/content) over re-fetching URLs.
-    Many sites return JS-disabled stubs to bare httpx clients even when Tavily
-    already has usable text.
+    Prefers Tavily-extracted content over re-fetching URLs. Skips LLM
+    summarization for short snippets and parallelizes summarization for large
+    pages only.
 
     Args:
         results: Tavily search results dictionary
-        on_status: Optional callback for client-visible progress (summarizing)
+        on_status: Optional callback for client-visible progress
 
     Returns:
         List of processed results with filenames and raw content
     """
+    hits = results.get("results", [])
+    total = len(hits)
+    if total == 0:
+        return []
+
     if on_status is not None:
-        on_status("Summarizing search results…")
+        on_status(f"Processing {total} search result{'s' if total != 1 else ''}…")
 
-    processed_results = []
-
+    fetched: list[tuple[dict, str]] = []
     with httpx.Client(timeout=30.0, follow_redirects=True) as client:
-        for result in results.get("results", []):
-            url = result["url"]
-            tavily_content = _tavily_result_content(result)
-            raw_content = ""
+        for index, result in enumerate(hits, start=1):
+            if on_status is not None:
+                on_status(f"Fetching content for result {index}/{total}…")
+            fetched.append((result, _fetch_result_content(result, client=client)))
 
-            if tavily_content and not _is_low_value_content(tavily_content):
-                raw_content = tavily_content
-            else:
-                try:
-                    response = client.get(url)
-                    if response.status_code == 200:
-                        fetched = markdownify(response.text)
-                        if not _is_low_value_content(fetched):
-                            raw_content = fetched
-                        elif tavily_content:
-                            raw_content = tavily_content
-                    elif tavily_content:
-                        raw_content = tavily_content
-                except (httpx.TimeoutException, httpx.RequestError):
-                    if tavily_content:
-                        raw_content = tavily_content
+    summaries: list[Summary | None] = [None] * total
+    to_summarize: list[tuple[int, str, str]] = []
 
-            if not raw_content:
-                raw_content = result.get("content", "No content available.")
+    for index, (result, raw_content) in enumerate(fetched):
+        title = str(result.get("title") or "")
+        snippet = str(result.get("content") or "")
+        if _needs_llm_summarize(raw_content):
+            to_summarize.append((index, raw_content, title))
+            continue
+        if on_status is not None:
+            on_status(f"Using snippet for result {index + 1}/{total}…")
+        summaries[index] = _summary_from_snippet(
+            raw_content,
+            title=title,
+            tavily_snippet=snippet,
+        )
 
-            summary_obj = summarize_webpage_content(
-                raw_content,
-                title=result.get("title", ""),
+    if to_summarize:
+        summarize_total = len(to_summarize)
+        if on_status is not None:
+            on_status(
+                f"Summarizing {summarize_total} large result"
+                f"{'s' if summarize_total != 1 else ''}…"
             )
+        workers = min(summarize_total, 4)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_map = {
+                executor.submit(
+                    summarize_webpage_content,
+                    content,
+                    title=title,
+                ): idx
+                for idx, content, title in to_summarize
+            }
+            completed = 0
+            for future in as_completed(future_map):
+                idx = future_map[future]
+                summaries[idx] = future.result()
+                completed += 1
+                if on_status is not None:
+                    on_status(f"Summarized result {completed}/{summarize_total}…")
 
-            # uniquify file names
-            uid = base64.urlsafe_b64encode(uuid.uuid4().bytes).rstrip(b"=").decode("ascii")[:8]
-            name, ext = os.path.splitext(summary_obj.filename)
-            summary_obj.filename = _normalize_virtual_path(f"{name}_{uid}{ext}")
+    processed_results: list[dict] = []
+    for (result, raw_content), summary_obj in zip(fetched, summaries):
+        if summary_obj is None:
+            continue
 
-            processed_results.append({
-                "url": result["url"],
-                "title": result["title"],
-                "summary": summary_obj.summary,
-                "filename": summary_obj.filename,
-                "raw_content": raw_content,
-                "content": result.get("content") or "",
-                "published_date": result.get("published_date"),
-                "score": result.get("score"),
-                "favicon": result.get("favicon"),
-            })
+        uid = base64.urlsafe_b64encode(uuid.uuid4().bytes).rstrip(b"=").decode("ascii")[:8]
+        name, ext = os.path.splitext(summary_obj.filename)
+        summary_obj.filename = _normalize_virtual_path(f"{name}_{uid}{ext}")
+
+        processed_results.append({
+            "url": result["url"],
+            "title": result["title"],
+            "summary": summary_obj.summary,
+            "filename": summary_obj.filename,
+            "raw_content": raw_content,
+            "content": result.get("content") or "",
+            "published_date": result.get("published_date"),
+            "score": result.get("score"),
+            "favicon": result.get("favicon"),
+        })
 
     return processed_results
 
@@ -461,8 +625,28 @@ def web_search_tool(
     resolved_topic = topic or (
         "news" if _prefers_news_topic(search_query) else "general"
     )
+    is_simple = _is_simple_query(search_query)
+    search_budget = _max_web_searches_for_query(search_query)
+    prior_searches = _count_prior_web_searches(state.get("messages"))
+    if prior_searches >= search_budget:
+        return Command(
+            update={
+                "messages": [
+                    text_tool_message(
+                        f"Search limit reached ({search_budget} call"
+                        f"{'s' if search_budget != 1 else ''} for this question). "
+                        "Answer from the files and sources already saved — "
+                        "do not call web_search_tool again.",
+                        tool_call_id,
+                        status="error",
+                    ),
+                ],
+            }
+        )
+
     # Bias the engine toward today's facts without replacing the user query.
     dated_query = f"{search_query} (as of {get_today_str()})"
+    tavily_options = _tavily_search_options(resolved_topic, is_simple=is_simple)
 
     def _status(message: str) -> None:
         runtime.emit_output_delta(message)
@@ -473,10 +657,9 @@ def web_search_tool(
             dated_query,
             max_results=max_results,
             topic=resolved_topic,
-            include_raw_content=True,
             time_range=time_range,
-            include_answer=True,
             include_favicon=True,
+            **tavily_options,
         )
         processed_results = process_search_results(
             search_results,

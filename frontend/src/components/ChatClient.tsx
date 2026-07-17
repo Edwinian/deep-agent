@@ -621,6 +621,16 @@ function StreamStatusBlock({ lines }: { lines: string[] }) {
   )
 }
 
+function LoadingDots() {
+  return (
+    <span className="loading-dots" aria-hidden="true">
+      <span className="loading-dot">.</span>
+      <span className="loading-dot">.</span>
+      <span className="loading-dot">.</span>
+    </span>
+  )
+}
+
 function formatToolLabel(name: string): string {
   return name
     .split(/[_-]+/)
@@ -644,7 +654,7 @@ function ThinkingBlock({
       </summary>
       <pre>
         {reasoning}
-        {streaming ? <span className="cursor" aria-hidden="true" /> : null}
+        {streaming ? <LoadingDots /> : null}
       </pre>
     </details>
   )
@@ -871,6 +881,9 @@ function MessageCard({
   const copyText = stripInlineSources(bodyText || reasoning || '')
   const showFooter =
     !message.streaming && message.role === 'assistant' && Boolean(showActions)
+  const showStreamStatus =
+    message.statusLines?.length &&
+    (message.streaming || !bodyText.trim())
 
   return (
     <article className={`message message-${message.role}`}>
@@ -881,9 +894,15 @@ function MessageCard({
             ? 'Agent'
             : 'System'}
       </div>
-      {message.statusLines?.length &&
-      (message.streaming || !bodyText.trim()) ? (
-        <StreamStatusBlock lines={message.statusLines} />
+      {showStreamStatus ? (
+        <>
+          <StreamStatusBlock lines={message.statusLines!} />
+          {message.streaming ? (
+            <div className="stream-status-loading">
+              <LoadingDots />
+            </div>
+          ) : null}
+        </>
       ) : null}
       {reasoning ? (
         <ThinkingBlock
@@ -903,12 +922,11 @@ function MessageCard({
       {bodyText ? (
         <div className="message-body">
           {stripInlineSources(bodyText)}
-          {message.streaming ? <span className="cursor" aria-hidden="true" /> : null}
+          {message.streaming ? <LoadingDots /> : null}
         </div>
       ) : message.streaming && !message.statusLines?.length ? (
         <div className="message-body muted">
-          Streaming
-          <span className="cursor" aria-hidden="true" />
+          <LoadingDots />
         </div>
       ) : null}
       {showFooter ? (
@@ -1173,7 +1191,9 @@ export default function ChatClient() {
             const replyText = parsedAsBlocks
               ? split.text
               : sanitizedReply || split.text
-            content = content || replyText || ''
+            // Prefer the final backend reply over any intermediate streamed
+            // placeholder text (e.g. "Researching …").
+            content = replyText || content || ''
             reasoning =
               reasoning ||
               chunk.reasoning_content ||
@@ -1355,7 +1375,7 @@ export default function ChatClient() {
           abortRef.current = null
           await cancelStream(activeThreadId).catch(() => undefined)
         }
-        await clearFromLastUser(activeThreadId, GENERAL_AGENT_ID)
+        await clearFromLastUser(activeThreadId, GENERAL_AGENT_ID).catch(() => undefined)
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to prepare regenerate')
         return
@@ -1474,6 +1494,8 @@ export default function ChatClient() {
     if (active) {
       try {
         await cancelStream(active)
+        // Drop the aborted turn from the checkpoint so retry/resend starts clean.
+        await clearFromLastUser(active, GENERAL_AGENT_ID).catch(() => undefined)
       } catch (err) {
         setError((err as Error).message)
       }

@@ -32,6 +32,12 @@ DEFAULT_MODEL = ModelName.GROK_4_FAST_NON_REASONING.with_provider()
 MAX_CONCURRENT_RESEARCH_UNITS = 3
 MAX_RESEARCHER_ITERATIONS = 3
 
+RAG_AGENT_DESCRIPTION = (
+    "Answers from the ChromaDB vector store via retrieve_tool. "
+    "Use when the user asks about indexed documents, vector DB, "
+    "Chroma, or Lilian Weng blog posts — not for live web search."
+)
+
 RESEARCH_SYSTEM_PROMPT_ID = 1
 GENERAL_SYSTEM_PROMPT_ID = 2
 RAG_SYSTEM_PROMPT_ID = 3
@@ -129,11 +135,7 @@ def seed_default_agents(conn: sqlite3.Connection) -> None:
             (
                 RAG_AGENT_ID,
                 AgentName.RAG_AGENT,
-                (
-                    "Delegate questions that need grounded answers from indexed "
-                    "documents in the ChromaDB vector store. Use when the user asks "
-                    "about content that may already be indexed rather than live web data."
-                ),
+                RAG_AGENT_DESCRIPTION,
                 RAG_SYSTEM_PROMPT_ID,
                 None,
                 DEFAULT_MODEL,

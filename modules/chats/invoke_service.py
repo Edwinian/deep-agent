@@ -47,7 +47,11 @@ from utils.hitl import (
     collect_pending_interrupts,
     is_resume_request,
 )
-from utils.langfuse_tracing import with_langfuse_config
+from utils.tracing import (
+    flush_langsmith_traces,
+    langsmith_request_context,
+    with_tracing_config,
+)
 from utils.resolve_agent import resolve_agent
 
 _INTERRUPT_NOT_FOUND_DETAIL = (
@@ -67,6 +71,17 @@ _NO_USER_MESSAGE_DETAIL = (
 _THREAD_NOT_FOUND_DETAIL = (
     "No checkpoint history found for this thread_id."
 )
+
+_CANCELLED_TOOL_OUTPUT_MARKERS = (
+    "was cancelled",
+    "another message came in before it could be completed",
+)
+
+
+def is_cancelled_tool_output(text: str) -> bool:
+    """True for LangGraph tool-call cancellation hand-back messages."""
+    lower = text.strip().lower()
+    return any(marker in lower for marker in _CANCELLED_TOOL_OUTPUT_MARKERS)
 
 
 class InvokeService:
@@ -138,7 +153,7 @@ class InvokeService:
                 if name != "task":
                     continue
                 text = InvokeService.content_to_text(message.content).strip()
-                if text:
+                if text and not is_cancelled_tool_output(text):
                     return text
                 continue
             if isinstance(message, dict) and message.get("type") == "tool":
@@ -149,7 +164,7 @@ class InvokeService:
                 if name != "task":
                     continue
                 text = InvokeService.content_to_text(data.get("content")).strip()
-                if text:
+                if text and not is_cancelled_tool_output(text):
                     return text
         return ""
 
@@ -292,6 +307,7 @@ class InvokeService:
                 status_code=400,
                 detail="message is required unless resuming with permissions.",
             )
+        await self._prepare_thread_for_new_user_message(agent, config)
         return {"messages": [HumanMessage(content=message)]}
 
     async def run_agent(
@@ -308,7 +324,7 @@ class InvokeService:
             or config.get("configurable", {}).get("thread_id")
             or ""
         )
-        config = with_langfuse_config(
+        config = with_tracing_config(
             config,
             thread_id=str(thread_id),
             agent_id=payload["agent_id"],
@@ -320,8 +336,14 @@ class InvokeService:
         )
         if thread_id:
             sync_skills_for_thread(payload["agent_id"], thread_id)
-        with mcp_access_token_context(access_token):
-            return await agent.ainvoke(input_state, config=config)
+        with mcp_access_token_context(access_token), langsmith_request_context(
+            thread_id=str(thread_id),
+            agent_id=payload["agent_id"],
+            tags=["invoke"],
+        ):
+            result = await agent.ainvoke(input_state, config=config)
+        flush_langsmith_traces()
+        return result
 
     async def invoke(
         self,
@@ -370,6 +392,112 @@ class InvokeService:
             if collect_pending_interrupts(snapshot):
                 return True
         return False
+
+    @staticmethod
+    def _last_human_index(messages: list[Any]) -> int | None:
+        for index in range(len(messages) - 1, -1, -1):
+            if InvokeService._is_human_message(messages[index]):
+                return index
+        return None
+
+    @staticmethod
+    def _trailing_turn_is_incomplete(trailing: list[Any]) -> bool:
+        """True when assistant/tool messages after the last user turn are partial."""
+        if not trailing:
+            return False
+
+        for message in trailing:
+            if is_cancelled_tool_output(InvokeService._message_text(message)):
+                return True
+
+        pending_tool_ids: set[str] = set()
+        for message in trailing:
+            tool_calls: list[Any] = []
+            if isinstance(message, AIMessage):
+                tool_calls = list(message.tool_calls or [])
+            elif isinstance(message, dict) and message.get("type") == "ai":
+                data = message.get("data")
+                if isinstance(data, dict):
+                    tool_calls = list(data.get("tool_calls") or [])
+
+            for tool_call in tool_calls:
+                if isinstance(tool_call, dict):
+                    tool_call_id = tool_call.get("id")
+                    if isinstance(tool_call_id, str) and tool_call_id:
+                        pending_tool_ids.add(tool_call_id)
+
+            tool_call_id = None
+            if isinstance(message, ToolMessage):
+                tool_call_id = message.tool_call_id
+            elif isinstance(message, dict) and message.get("type") == "tool":
+                data = message.get("data")
+                if isinstance(data, dict):
+                    tool_call_id = data.get("tool_call_id")
+            if isinstance(tool_call_id, str) and tool_call_id:
+                pending_tool_ids.discard(tool_call_id)
+
+        if pending_tool_ids:
+            return True
+
+        last = trailing[-1]
+        if isinstance(last, AIMessage):
+            if last.tool_calls and not InvokeService.content_to_text(last.content).strip():
+                return True
+        elif isinstance(last, dict) and last.get("type") == "ai":
+            data = last.get("data")
+            if isinstance(data, dict) and data.get("tool_calls"):
+                if not InvokeService.content_to_text(data.get("content")).strip():
+                    return True
+        return False
+
+    async def _rewind_checkpoint_messages(
+        self,
+        agent: CompiledStateGraph,
+        config: RunnableConfig,
+        kept_messages: list[Any],
+    ) -> None:
+        """Rewrite checkpoint messages and clear ephemeral turn state."""
+        await agent.aupdate_state(
+            config,
+            {
+                "messages": [
+                    RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                    *kept_messages,
+                ],
+                "files": {},
+                "todos": [],
+            },
+        )
+
+    async def _prepare_thread_for_new_user_message(
+        self,
+        agent: CompiledStateGraph,
+        config: RunnableConfig,
+    ) -> None:
+        """Drop aborted or duplicate user turns before appending a new message.
+
+        After stop/cancel the checkpoint may still hold a user bubble with no
+        finished assistant reply, cancelled tool calls, or virtual files from
+        the partial run. Rewind so the new message does not stack on stale state.
+        """
+        snapshot = await agent.aget_state(config, subgraphs=True)
+        messages = list((snapshot.values or {}).get("messages") or [])
+        if not messages:
+            return
+
+        last_human_idx = self._last_human_index(messages)
+        if last_human_idx is None:
+            return
+
+        trailing = messages[last_human_idx + 1 :]
+        if not trailing:
+            kept = messages[:last_human_idx]
+            await self._rewind_checkpoint_messages(agent, config, kept)
+            return
+
+        if self._trailing_turn_is_incomplete(trailing):
+            kept = messages[:last_human_idx]
+            await self._rewind_checkpoint_messages(agent, config, kept)
 
     @staticmethod
     def _is_human_message(message: Any) -> bool:
@@ -680,10 +808,7 @@ class InvokeService:
 
         kept = messages[:last_human_idx]
         removed_count = len(messages) - len(kept)
-        await agent.aupdate_state(
-            config,
-            {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *kept]},
-        )
+        await self._rewind_checkpoint_messages(agent, config, kept)
         return ThreadRewindResponse(
             thread_id=thread_id,
             message=last_user_text,

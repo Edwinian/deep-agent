@@ -55,6 +55,105 @@ def last_user_text(state_or_messages: Any) -> str:
 _USER_REQUEST_PATH = "/user_request.txt"
 
 
+def agent_context_text(state_or_messages: Any) -> str:
+    """Return the best available natural-language brief for arg repair."""
+    if isinstance(state_or_messages, dict):
+        files = state_or_messages.get("files")
+        if isinstance(files, dict):
+            user_request = files.get(_USER_REQUEST_PATH) or files.get(
+                _USER_REQUEST_PATH.lstrip("/")
+            )
+            if isinstance(user_request, str) and user_request.strip():
+                return user_request.strip()
+
+    direct = last_user_text(state_or_messages)
+    if direct:
+        return direct
+
+    if isinstance(state_or_messages, list):
+        messages = state_or_messages
+    elif isinstance(state_or_messages, dict):
+        messages = state_or_messages.get("messages") or []
+    else:
+        return ""
+
+    for message in messages:
+        if not isinstance(message, HumanMessage):
+            continue
+        text = _message_text(message.content)
+        if text:
+            return text
+    return ""
+
+
+_RAG_REQUEST_MARKERS = (
+    "vector db",
+    "vector database",
+    "vectordb",
+    "chromadb",
+    "chroma db",
+    "chroma",
+    "indexed document",
+    "indexed doc",
+    "look up on vector",
+    "retrieval from",
+)
+
+_MISROUTE_REPLY_MARKERS = (
+    "misrouted",
+    "re-delegate",
+    "should be handled by rag_agent",
+    "should go to rag_agent",
+)
+
+_CANCELLED_TOOL_OUTPUT_MARKERS = (
+    "was cancelled",
+    "another message came in before it could be completed",
+)
+
+
+def _is_rag_request(user_text: str) -> bool:
+    """True when the user asked for vector-store / indexed-document lookup."""
+    text = user_text.lower()
+    return any(marker in text for marker in _RAG_REQUEST_MARKERS)
+
+
+def _infer_subagent_type(user_text: str, *, default: str) -> str:
+    if _is_rag_request(user_text):
+        return str(AgentName.RAG_AGENT)
+    return default
+
+
+def _default_task_description(user_text: str, subagent_type: str) -> str:
+    if subagent_type == str(AgentName.RAG_AGENT):
+        return user_text.strip() or "Answer using retrieve_tool on the vector store."
+    return (
+        "Research and answer this user question with up-to-date "
+        "sources. Return a concise factual answer only — do not "
+        "include inline citations or a Sources section.\n\n"
+        f"Question: {user_text}"
+    )
+
+
+def _task_content_is_actionable(content: str) -> bool:
+    """False for empty replies or sub-agent misroute hand-backs."""
+    text = content.strip()
+    if not text:
+        return False
+    lower = text.lower()
+    if any(marker in lower for marker in _MISROUTE_REPLY_MARKERS):
+        return False
+    if any(marker in lower for marker in _CANCELLED_TOOL_OUTPUT_MARKERS):
+        return False
+    if "rag_agent" in lower and ("should be" in lower or "handled by" in lower):
+        return False
+    if "query: field required" in lower and "retrieve_tool" in lower:
+        return False
+    if "vector db lookup" in lower and "wasn't able" in lower:
+        return False
+    return True
+
+
 def _default_research_todos(user_text: str) -> list[dict[str, str]]:
     """Build a minimal research plan when the model omits write_todos args."""
     topic = " ".join(user_text.split()) if user_text else "the user request"
@@ -90,16 +189,17 @@ def repair_tool_call_args(
     changed = False
 
     if name == "task":
-        if not str(args.get("subagent_type") or "").strip():
-            args["subagent_type"] = default_subagent_type
+        inferred_subagent = _infer_subagent_type(
+            user_text,
+            default=default_subagent_type,
+        )
+        subagent_type = str(args.get("subagent_type") or "").strip()
+        if not subagent_type:
+            args["subagent_type"] = inferred_subagent
+            subagent_type = inferred_subagent
             changed = True
         if not str(args.get("description") or "").strip() and user_text:
-            args["description"] = (
-                "Research and answer this user question with up-to-date "
-                "sources. Return a concise factual answer only — do not "
-                "include inline citations or a Sources section.\n\n"
-                f"Question: {user_text}"
-            )
+            args["description"] = _default_task_description(user_text, subagent_type)
             changed = True
     elif name == "web_search_tool":
         query = str(args.get("query") or "").strip()
@@ -108,6 +208,16 @@ def repair_tool_call_args(
             changed = True
         elif query:
             repaired_query = _search_query_from_text(query)
+            if repaired_query != query:
+                args["query"] = repaired_query
+                changed = True
+    elif name == "retrieve_tool":
+        query = str(args.get("query") or "").strip()
+        if not query and user_text:
+            args["query"] = _retrieve_query_from_text(user_text)
+            changed = True
+        elif query:
+            repaired_query = _retrieve_query_from_text(query)
             if repaired_query != query:
                 args["query"] = repaired_query
                 changed = True
@@ -151,6 +261,29 @@ def _search_query_from_text(text: str) -> str:
     return " ".join(text.split())
 
 
+def _retrieve_query_from_text(text: str) -> str:
+    """Build a vector-retrieval query from a user message or delegated task brief."""
+    stripped = text.strip()
+    if not stripped:
+        return ""
+
+    match = re.search(r"(?im)^\s*question\s*:\s*(.+?)(?:\n|$)", stripped)
+    if match:
+        stripped = match.group(1).strip()
+
+    stripped = re.sub(
+        r"(?i)\s*answer by looking up on vector\s*db\.?$",
+        "",
+        stripped,
+    ).strip()
+    stripped = re.sub(
+        r"(?i)\s*using retrieve_tool on the vector store\.?$",
+        "",
+        stripped,
+    ).strip()
+    return stripped or " ".join(text.split())
+
+
 def dedupe_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop duplicate tool calls with the same name and args."""
     deduped: list[dict[str, Any]] = []
@@ -185,7 +318,7 @@ def _has_successful_task_result(messages: list[Any] | None) -> bool:
         if isinstance(message, ToolMessage):
             if str(message.name or "") != "task":
                 continue
-            if _message_text(message.content):
+            if _task_content_is_actionable(_message_text(message.content)):
                 return True
             continue
         if isinstance(message, dict) and message.get("type") == "tool":
@@ -194,7 +327,7 @@ def _has_successful_task_result(messages: list[Any] | None) -> bool:
                 continue
             if str(data.get("name") or message.get("name") or "") != "task":
                 continue
-            if _message_text(data.get("content")):
+            if _task_content_is_actionable(_message_text(data.get("content"))):
                 return True
     return False
 
@@ -261,7 +394,7 @@ class ToolCallArgsRepairMiddleware(AgentMiddleware):
     default_subagent_type: str = str(AgentName.RESEARCH_AGENT)
 
     def _user_text_from_request(self, request: ModelRequest[Any]) -> str:
-        return last_user_text(request.messages) or last_user_text(request.state)
+        return agent_context_text(request.state) or agent_context_text(request.messages)
 
     def _repair_model_response_messages(
         self,
@@ -336,7 +469,7 @@ class ToolCallArgsRepairMiddleware(AgentMiddleware):
     def _repair_request(self, request: ToolCallRequest) -> ToolCallRequest:
         repaired = repair_tool_call_args(
             dict(request.tool_call),
-            user_text=last_user_text(request.state),
+            user_text=agent_context_text(request.state),
             default_subagent_type=self.default_subagent_type,
         )
         if repaired is None:

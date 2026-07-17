@@ -29,7 +29,11 @@ from mcp_interceptors.mcp_auth import mcp_access_token_context
 from utils.content_blocks import extract_user_text, is_non_text_content_block_dump
 from utils.daytona_sandbox import sync_skills_for_thread
 from utils.hitl import collect_action_requests
-from utils.langfuse_tracing import with_langfuse_config
+from utils.tracing import (
+    flush_langsmith_traces,
+    langsmith_request_context,
+    with_tracing_config,
+)
 
 STREAM_EVENTS_VERSION: Literal["v3"] = "v3"
 
@@ -1127,10 +1131,19 @@ class StreamService:
                 print()
         """
         sync_skills_for_thread(agent_id, thread_id)
-        with mcp_access_token_context(access_token):
+        resolved_config = with_tracing_config(
+            config,
+            thread_id=thread_id,
+            agent_id=agent_id,
+        )
+        with mcp_access_token_context(access_token), langsmith_request_context(
+            thread_id=thread_id,
+            agent_id=agent_id,
+            tags=["stream"],
+        ):
             run: AsyncGraphRunStream = await agent.astream_events(
                 input_state,
-                config=config,
+                config=resolved_config,
                 version=STREAM_EVENTS_VERSION,
             )
 
@@ -1213,6 +1226,7 @@ class StreamService:
                 async with self._runs_lock:
                     self._active_runs.pop(thread_id, None)
                     self._cancel_requested.discard(thread_id)
+                flush_langsmith_traces()
 
     async def stream(
         self,
@@ -1225,7 +1239,7 @@ class StreamService:
         agent_id = payload["agent_id"]
         agent = await self._invoke_service.get_compiled_agent(agent_id, model_config)
         thread_id = payload.get("thread_id") or str(uuid.uuid4())
-        config: RunnableConfig = with_langfuse_config(
+        config: RunnableConfig = with_tracing_config(
             {"configurable": {"thread_id": thread_id}},
             thread_id=thread_id,
             agent_id=agent_id,
