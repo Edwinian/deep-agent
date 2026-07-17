@@ -12,7 +12,7 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from typing_extensions import override
 
@@ -122,6 +122,10 @@ def repair_tool_call_args(
         if not str(args.get("content") or "").strip() and user_text:
             args["content"] = user_text
             changed = True
+    elif name in {"read_file", "edit_file"}:
+        if not str(args.get("file_path") or "").strip():
+            args["file_path"] = _USER_REQUEST_PATH
+            changed = True
     elif name == "write_todos":
         todos = args.get("todos")
         if not isinstance(todos, list) or not todos:
@@ -162,20 +166,61 @@ def dedupe_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return deduped
 
 
+def _tool_call_args_empty(tool_call: dict[str, Any]) -> bool:
+    args = tool_call.get("args")
+    if args is None:
+        return True
+    if isinstance(args, dict):
+        return not any(str(value or "").strip() for value in args.values())
+    if isinstance(args, str):
+        return not args.strip()
+    return False
+
+
+def _has_successful_task_result(messages: list[Any] | None) -> bool:
+    """True when a prior ``task`` tool already returned a non-empty answer."""
+    if not messages:
+        return False
+    for message in reversed(messages):
+        if isinstance(message, ToolMessage):
+            if str(message.name or "") != "task":
+                continue
+            if _message_text(message.content):
+                return True
+            continue
+        if isinstance(message, dict) and message.get("type") == "tool":
+            data = message.get("data") or message
+            if not isinstance(data, dict):
+                continue
+            if str(data.get("name") or message.get("name") or "") != "task":
+                continue
+            if _message_text(data.get("content")):
+                return True
+    return False
+
+
 def _repair_ai_message(
     message: AIMessage,
     *,
     user_text: str,
     default_subagent_type: str,
+    prior_messages: list[Any] | None = None,
 ) -> AIMessage | None:
     """Return a repaired AIMessage, or None if unchanged."""
     if not message.tool_calls:
         return None
 
+    drop_empty_task = _has_successful_task_result(prior_messages)
     repaired_calls: list[dict[str, Any]] = []
     changed = False
     for tool_call in message.tool_calls:
         call_dict = dict(tool_call)
+        name = str(call_dict.get("name") or "")
+        # Grok often re-emits an empty ``task`` after research already succeeded.
+        # Auto-filling that re-runs the same search and re-triggers HITL.
+        if name == "task" and _tool_call_args_empty(call_dict) and drop_empty_task:
+            changed = True
+            continue
         repaired = repair_tool_call_args(
             call_dict,
             user_text=user_text,
@@ -224,6 +269,7 @@ class ToolCallArgsRepairMiddleware(AgentMiddleware):
         result: list[Any],
     ) -> tuple[list[Any], bool]:
         user_text = self._user_text_from_request(request)
+        prior_messages = list(request.messages or [])
         new_result: list[Any] = []
         changed = False
         for message in result:
@@ -232,6 +278,7 @@ class ToolCallArgsRepairMiddleware(AgentMiddleware):
                     message,
                     user_text=user_text,
                     default_subagent_type=self.default_subagent_type,
+                    prior_messages=prior_messages,
                 )
                 if repaired is not None:
                     new_result.append(repaired)
@@ -252,6 +299,7 @@ class ToolCallArgsRepairMiddleware(AgentMiddleware):
                 response,
                 user_text=self._user_text_from_request(request),
                 default_subagent_type=self.default_subagent_type,
+                prior_messages=list(request.messages or []),
             )
             return repaired if repaired is not None else response
 

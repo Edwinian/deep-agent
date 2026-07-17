@@ -18,6 +18,7 @@ from schemas.invoke_response import (
     StreamToolStatus,
     ToolCallStatus,
 )
+from utils.content_blocks import extract_user_text
 from utils.hitl import collect_action_requests
 
 STREAM_EVENTS_VERSION = "v3"
@@ -50,19 +51,7 @@ def graph_from_namespace(namespace: list[str] | tuple[str, ...] | None) -> list[
 
 def _content_to_text(content: Any) -> str:
     """Convert LangChain message content (str or block list) to plain text."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict):
-                text = block.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-        return "".join(parts)
-    return ""
+    return extract_user_text(content)
 
 
 def _interrupt_event(interrupts: list[Any]) -> AdaptedStreamEvent | None:

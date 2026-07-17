@@ -38,6 +38,7 @@ from schemas.thread_rewind_response import ThreadRewindResponse
 from schemas.thread_teardown_response import ThreadTeardownResponse
 from mcp_interceptors.mcp_auth import mcp_access_token_context
 from utils.compile_agent import compile_agent
+from utils.content_blocks import extract_user_text, is_non_text_content_block_dump
 from utils.daytona_sandbox import delete_daytona_sandbox, sync_skills_for_thread
 from utils.get_checkpointer import delete_thread_checkpoints, get_sqlite_checkpointer
 from utils.hitl import (
@@ -113,19 +114,7 @@ class InvokeService:
     @staticmethod
     def content_to_text(content: Any) -> str:
         """Extract user-facing text blocks from LangChain message content."""
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts: list[str] = []
-            for block in content:
-                if isinstance(block, str):
-                    parts.append(block)
-                elif isinstance(block, dict) and block.get("type") == "text":
-                    text = block.get("text")
-                    if isinstance(text, str):
-                        parts.append(text)
-            return "".join(parts)
-        return ""
+        return extract_user_text(content)
 
     @staticmethod
     def content_to_reasoning(content: Any) -> str:
@@ -141,28 +130,64 @@ class InvokeService:
         return "".join(parts)
 
     @staticmethod
-    def last_ai_reply(messages: list[Any]) -> str:
-        """Return the invoke-equivalent final assistant reply from graph messages."""
+    def last_task_tool_output(messages: list[Any]) -> str:
+        """Return the latest non-empty ``task`` tool result (subagent answer)."""
         for message in reversed(messages):
-            if isinstance(message, AIMessage):
-                text = InvokeService.content_to_text(message.content)
+            if isinstance(message, ToolMessage):
+                name = str(message.name or "")
+                if name != "task":
+                    continue
+                text = InvokeService.content_to_text(message.content).strip()
                 if text:
                     return text
-                reasoning = InvokeService.content_to_reasoning(message.content)
-                if reasoning:
-                    return reasoning
                 continue
+            if isinstance(message, dict) and message.get("type") == "tool":
+                data = message.get("data", {})
+                if not isinstance(data, dict):
+                    continue
+                name = str(data.get("name") or message.get("name") or "")
+                if name != "task":
+                    continue
+                text = InvokeService.content_to_text(data.get("content")).strip()
+                if text:
+                    return text
+        return ""
+
+    @staticmethod
+    def last_ai_reply(
+        messages: list[Any],
+        *,
+        allow_task_fallback: bool = True,
+    ) -> str:
+        """Return the invoke-equivalent final assistant reply from graph messages.
+
+        Use only the chronologically last AI message's user-facing text.
+        Skip stringified tool_call-only dumps. If that turn has no answer
+        (common when Grok stalls on file tools), optionally fall back to the
+        latest ``task`` subagent output — do not reuse earlier mid-run AI
+        chatter. Disable task fallback on HITL pauses so a prior research
+        answer is not shown as a finished reply while tools still need approval.
+        """
+        for message in reversed(messages):
+            if isinstance(message, AIMessage):
+                text = InvokeService.content_to_text(message.content).strip()
+                if text and not is_non_text_content_block_dump(text):
+                    return text
+                if allow_task_fallback:
+                    return InvokeService.last_task_tool_output(messages)
+                return ""
             if isinstance(message, dict) and message.get("type") == "ai":
                 data = message.get("data", {})
                 if not isinstance(data, dict):
                     continue
-                content = data.get("content")
-                text = InvokeService.content_to_text(content)
-                if text:
+                text = InvokeService.content_to_text(data.get("content")).strip()
+                if text and not is_non_text_content_block_dump(text):
                     return text
-                reasoning = InvokeService.content_to_reasoning(content)
-                if reasoning:
-                    return reasoning
+                if allow_task_fallback:
+                    return InvokeService.last_task_tool_output(messages)
+                return ""
+        if allow_task_fallback:
+            return InvokeService.last_task_tool_output(messages)
         return ""
 
     @staticmethod

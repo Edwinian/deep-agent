@@ -436,7 +436,7 @@ def web_search_tool(
     time_range: Annotated[
         Literal["day", "week", "month", "year"],
         InjectedToolArg,
-    ] = "year",
+    ] = "week",
 ) -> Command:
     """Search web and save detailed results to files while returning minimal context.
 

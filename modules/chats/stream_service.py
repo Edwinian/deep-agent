@@ -26,6 +26,7 @@ from schemas.invoke_response import (
 from schemas.content_type import CONTENT_TYPE_KEY
 from schemas.source import SOURCES_KEY, Source
 from mcp_interceptors.mcp_auth import mcp_access_token_context
+from utils.content_blocks import extract_user_text, is_non_text_content_block_dump
 from utils.daytona_sandbox import sync_skills_for_thread
 from utils.hitl import collect_action_requests
 from utils.langfuse_tracing import with_langfuse_config
@@ -598,6 +599,9 @@ class StreamService:
                 if not item:
                     continue
                 delta_text = str(item)
+                # Grok may emit stringified tool_call blocks on the text channel.
+                if is_non_text_content_block_dump(delta_text):
+                    continue
                 streamed_answer_text += delta_text
                 yield self.emit_stream_chunk(
                     StreamTextChunk(
@@ -674,14 +678,21 @@ class StreamService:
 
         full_text_value = await message.text
         full_reasoning_value = await message.reasoning
-        full_text = "" if full_text_value is None else str(full_text_value)
+        full_text_raw = "" if full_text_value is None else str(full_text_value)
         full_reasoning = (
             "" if full_reasoning_value is None else str(full_reasoning_value)
         )
+        # Drop stringified tool_call-only dumps; unwrap text from block lists.
+        full_text = extract_user_text(full_text_raw)
 
-        if len(streamed_answer_text) < len(full_text):
+        if (
+            streamed_answer_text
+            and full_text
+            and streamed_answer_text != full_text
+            and full_text.startswith(streamed_answer_text)
+        ):
             remainder = full_text[len(streamed_answer_text) :]
-            if remainder:
+            if remainder and not is_non_text_content_block_dump(remainder):
                 yield self.emit_stream_chunk(
                     StreamTextChunk(
                         **common,
@@ -690,6 +701,15 @@ class StreamService:
                     )
                 )
                 streamed_answer_text = full_text
+        elif not streamed_answer_text and full_text:
+            yield self.emit_stream_chunk(
+                StreamTextChunk(
+                    **common,
+                    kind=StreamMessageKind.TEXT,
+                    delta=full_text,
+                )
+            )
+            streamed_answer_text = full_text
 
         if len(streamed_reasoning) < len(full_reasoning):
             remainder = full_reasoning[len(streamed_reasoning) :]
@@ -812,7 +832,12 @@ class StreamService:
                     agent_id=agent_id,
                     kind=StreamMessageKind.RUN_FINISHED,
                     status=InvokeStatus.AWAITING_TOOL_PERMISSION,
-                    reply=InvokeService.last_ai_reply(raw_result.get("messages", [])),
+                    # Do not promote prior task output as a "final" reply while
+                    # HITL is pending — that makes the UI look done + ask again.
+                    reply=InvokeService.last_ai_reply(
+                        raw_result.get("messages", []),
+                        allow_task_fallback=False,
+                    ),
                     action_requests=collect_action_requests(raw_result["__interrupt__"]),
                     interrupt_ids=self.interrupt_ids_from_payloads(
                         raw_result.get("__interrupt__", [])

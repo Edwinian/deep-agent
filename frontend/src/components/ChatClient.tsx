@@ -463,7 +463,7 @@ function splitReplyBlocks(raw: string): { text: string; reasoning: string } {
   let sawKnown = false
   for (const block of blocks) {
     const type = String(block.type || '')
-    if (type === 'reasoning') {
+    if (type === 'reasoning' || type === 'thinking') {
       sawKnown = true
       const value = block.reasoning ?? block.text ?? ''
       if (value) reasoningParts.push(String(value))
@@ -471,7 +471,7 @@ function splitReplyBlocks(raw: string): { text: string; reasoning: string } {
       sawKnown = true
       const value = block.text ?? block.content ?? ''
       if (value) textParts.push(String(value))
-    } else if (type === 'tool_call') {
+    } else if (type === 'tool_call' || type === 'tool_use') {
       sawKnown = true
     }
   }
@@ -486,15 +486,106 @@ function splitReplyBlocks(raw: string): { text: string; reasoning: string } {
   }
 }
 
+/** True when raw is a content-block list with no user-facing text. */
+function isNonTextContentBlockDump(raw: string): boolean {
+  const blocks = parseContentBlocks(raw)
+  if (!blocks) return false
+  const split = splitReplyBlocks(raw)
+  const hasTyped = blocks.some((block) => typeof block.type === 'string')
+  return hasTyped && !split.text.trim()
+}
+
+/** End index of a leading `[...]` list, or -1. */
+function leadingListEndIndex(input: string): number {
+  const start = input.search(/\S/)
+  if (start < 0 || input[start] !== '[') return -1
+
+  let depth = 0
+  let inString: "'" | '"' | null = null
+  let escaped = false
+
+  for (let i = start; i < input.length; i += 1) {
+    const ch = input[i]!
+    if (inString) {
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (ch === '\\') {
+        escaped = true
+        continue
+      }
+      if (ch === inString) inString = null
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      inString = ch
+      continue
+    }
+    if (ch === '[') depth += 1
+    else if (ch === ']') {
+      depth -= 1
+      if (depth === 0) return i + 1
+    }
+  }
+  return -1
+}
+
+/**
+ * Strip leading stringified content-block dumps (e.g. tool_call-only lists)
+ * that models sometimes emit on the text channel.
+ */
+function sanitizeAssistantContent(raw: string): string {
+  let rest = raw
+  for (let guard = 0; guard < 8; guard += 1) {
+    const end = leadingListEndIndex(rest)
+    if (end < 0) break
+    const candidate = rest.slice(0, end)
+    const blocks = parseContentBlocks(candidate)
+    if (!blocks) break
+    const hasTyped = blocks.some((block) => typeof block.type === 'string')
+    if (!hasTyped) break
+    const split = splitReplyBlocks(candidate)
+    const after = rest.slice(end).replace(/^\s*\n?/, '')
+    rest = split.text ? `${split.text}${after ? `\n${after}` : ''}` : after
+    if (split.text.trim()) break
+  }
+  return rest
+}
+
+/** Prefer the latest successful task/subagent output when the model never wrote text. */
+function lastSuccessfulTaskOutput(message: ChatMessage): string {
+  const tools = message.tools ?? []
+  for (let i = tools.length - 1; i >= 0; i -= 1) {
+    const tool = tools[i]
+    if (!tool || tool.name !== 'task') continue
+    if (tool.status !== 'done') continue
+    const output = (tool.output || '').trim()
+    if (!output) continue
+    const sanitized = sanitizeAssistantContent(output)
+    if (sanitized.trim()) return sanitized
+  }
+  return ''
+}
+
+function visibleAssistantText(raw: string): string {
+  const sanitized = sanitizeAssistantContent(raw)
+  if (!sanitized.trim()) return ''
+  const split = splitReplyBlocks(sanitized)
+  const parsedAsBlocks = parseContentBlocks(sanitized) != null
+  return (parsedAsBlocks ? split.text : sanitized).trim()
+}
+
 /** True when an assistant bubble has something to show (or is still streaming). */
 function hasRenderableContent(message: ChatMessage): boolean {
   if (message.role !== 'assistant') return true
   if (message.streaming || message.reasoningStreaming) return true
 
-  const split = splitReplyBlocks(message.content)
-  const parsedAsBlocks = parseContentBlocks(message.content) != null
+  const displayContent = sanitizeAssistantContent(message.content)
+  const split = splitReplyBlocks(displayContent)
+  const parsedAsBlocks = parseContentBlocks(displayContent) != null
   const reasoning = (message.reasoning || split.reasoning || '').trim()
-  const bodyText = (parsedAsBlocks ? split.text : message.content).trim()
+  const bodyText = (parsedAsBlocks ? split.text : displayContent).trim()
 
   if (bodyText) return true
   if (reasoning) return true
@@ -772,10 +863,11 @@ function MessageCard({
   showActions?: boolean
 }) {
   const sources = turnSources?.length ? turnSources : message.sources
-  const split = splitReplyBlocks(message.content)
-  const parsedAsBlocks = parseContentBlocks(message.content) != null
+  const displayContent = sanitizeAssistantContent(message.content)
+  const split = splitReplyBlocks(displayContent)
+  const parsedAsBlocks = parseContentBlocks(displayContent) != null
   const reasoning = message.reasoning || split.reasoning || undefined
-  const bodyText = parsedAsBlocks ? split.text : message.content
+  const bodyText = parsedAsBlocks ? split.text : displayContent
   const copyText = stripInlineSources(bodyText || reasoning || '')
   const showFooter =
     !message.streaming && message.role === 'assistant' && Boolean(showActions)
@@ -952,9 +1044,12 @@ export default function ChatClient() {
       }
 
       if (chunk.kind === 'text' && chunk.delta) {
+        if (isNonTextContentBlockDump(chunk.delta)) {
+          return
+        }
         updateAssistant((message) => ({
           ...message,
-          content: message.content + chunk.delta!,
+          content: sanitizeAssistantContent(message.content + chunk.delta!),
           streaming: true,
           reasoningStreaming: false,
         }))
@@ -1037,19 +1132,26 @@ export default function ChatClient() {
 
       if (chunk.kind === 'message_finished') {
         updateAssistant((message) => {
-          const fromContent = chunk.content
-            ? splitReplyBlocks(chunk.content)
+          const rawContent = chunk.content
+            ? sanitizeAssistantContent(chunk.content)
+            : ''
+          const fromContent = rawContent
+            ? splitReplyBlocks(rawContent)
             : { text: '', reasoning: '' }
+          const parsedAsBlocks = rawContent
+            ? parseContentBlocks(rawContent) != null
+            : false
           const reasoning =
             message.reasoning ||
             chunk.reasoning_content ||
             fromContent.reasoning ||
             ''
-          const content =
-            message.content ||
-            fromContent.text ||
-            (chunk.content && !fromContent.reasoning ? chunk.content : '') ||
-            ''
+          const finishedText = parsedAsBlocks
+            ? fromContent.text
+            : rawContent || fromContent.text
+          const content = sanitizeAssistantContent(
+            message.content || finishedText || '',
+          )
           return {
             ...message,
             content,
@@ -1061,28 +1163,44 @@ export default function ChatClient() {
       }
 
       if (chunk.kind === 'run_finished') {
-        if (chunk.reply) {
-          updateAssistant((message) => {
-            const split = splitReplyBlocks(chunk.reply || '')
-            return {
-              ...message,
-              content: message.content || split.text || '',
-              reasoning:
-                message.reasoning ||
-                chunk.reasoning_content ||
-                split.reasoning ||
-                undefined,
-              sources: mergeSources(message.sources, chunk.sources),
-              reasoningStreaming: false,
-            }
-          })
-        } else {
-          updateAssistant((message) => ({
+        updateAssistant((message) => {
+          let content = message.content || ''
+          let reasoning = message.reasoning
+          if (chunk.reply) {
+            const sanitizedReply = sanitizeAssistantContent(chunk.reply || '')
+            const split = splitReplyBlocks(sanitizedReply)
+            const parsedAsBlocks = parseContentBlocks(sanitizedReply) != null
+            const replyText = parsedAsBlocks
+              ? split.text
+              : sanitizedReply || split.text
+            content = content || replyText || ''
+            reasoning =
+              reasoning ||
+              chunk.reasoning_content ||
+              split.reasoning ||
+              undefined
+          } else if (chunk.reasoning_content) {
+            reasoning = reasoning || chunk.reasoning_content
+          }
+          content = sanitizeAssistantContent(content)
+          // Only promote task output when the run truly completed. On HITL
+          // pauses a prior research answer must not look like a finished reply.
+          if (
+            !visibleAssistantText(content) &&
+            chunk.status === 'completed'
+          ) {
+            content = lastSuccessfulTaskOutput(message)
+          }
+          return {
             ...message,
+            content,
+            reasoning,
             sources: mergeSources(message.sources, chunk.sources),
+            streaming: false,
             reasoningStreaming: false,
-          }))
-        }
+            statusLines: undefined,
+          }
+        })
         if (chunk.status === 'awaiting_tool_permission') {
           setPendingHitl({
             actionRequests: dedupeActionRequests(
@@ -1100,13 +1218,6 @@ export default function ChatClient() {
             },
           ])
         }
-        updateAssistant((message) => ({
-          ...message,
-          sources: mergeSources(message.sources, chunk.sources),
-          streaming: false,
-          reasoningStreaming: false,
-          statusLines: undefined,
-        }))
       }
     },
     [updateAssistant],
