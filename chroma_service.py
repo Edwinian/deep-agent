@@ -3,23 +3,16 @@ import os
 import re
 from typing import Dict, List, Optional
 
-import bs4
 import numpy as np
-import requests
 from fastapi import HTTPException
 from langchain_community.vectorstores.utils import filter_complex_metadata
-from langchain_community.document_loaders import (
-    UnstructuredPDFLoader,
-    UnstructuredWordDocumentLoader,
-    UnstructuredHTMLLoader,
-)
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
 
 from constants.model_name import ModelName
+from rag_pipeline import RagPipeline
 
 # Configure logging
 logging.basicConfig(filename="app.log", level=logging.INFO)
@@ -28,7 +21,6 @@ logger = logging.getLogger(__name__)
 
 class ChromaService:
     PERSIST_DIRECTORY = "./chroma_db"
-    WEB_PAGE_TIMEOUT_SECONDS = 20
     IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png"]
     FILE_EXTENSIONS = [
         ".pdf",
@@ -44,22 +36,11 @@ class ChromaService:
         chunk_size: int = 500,
         chunk_overlap: int = 100,
     ):
-        self.embedding_function = HuggingFaceEmbeddings(model_name=embedding_model)
-        self.text_splitter = RecursiveCharacterTextSplitter(
+        self.extractor = RagPipeline(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
-            length_function=len,
-            add_start_index=True,
-            separators=[
-                "\n\n",
-                "\n",
-                ". ",
-                "! ",
-                "? ",
-                " ",
-                "",
-            ],
         )
+        self.embedding_function = HuggingFaceEmbeddings(model_name=embedding_model)
         self.collection_name = collection_name or os.getenv("CHROMA_COLLECTION_NAME")
         self.vectorstore = Chroma(
             collection_name=self.format_collection_name(self.collection_name),
@@ -131,92 +112,7 @@ class ChromaService:
         return formatted_name
 
     def get_doc_splits_from_file(self, file_path: str) -> List[Document]:
-        file_extension = os.path.splitext(file_path)[1].lower()
-        file_loader_map = {
-            ".pdf": UnstructuredPDFLoader,
-            ".docx": UnstructuredWordDocumentLoader,
-            ".doc": UnstructuredWordDocumentLoader,
-            ".html": UnstructuredHTMLLoader,
-            ".txt": lambda x: [Document(page_content=open(x, "r").read())],
-        }
-        loader_class = file_loader_map.get(file_extension)
-
-        if not loader_class:
-            raise ValueError(f"File loader not found: {file_path}")
-
-        try:
-            if file_extension == ".txt":
-                documents = loader_class(file_path)
-            else:
-                loader = loader_class(file_path, mode="elements")
-                documents = loader.load()
-
-            processed_docs = []
-            current_content = ""
-
-            for doc in documents:
-                content = doc.page_content.strip()
-                if len(content) < 10:
-                    current_content += " " + content
-                else:
-                    if current_content:
-                        processed_docs.append(
-                            Document(
-                                page_content=current_content.strip(),
-                                metadata=doc.metadata,
-                            )
-                        )
-                        current_content = ""
-                    processed_docs.append(doc)
-
-            if current_content:
-                processed_docs.append(
-                    Document(
-                        page_content=current_content.strip(),
-                        metadata=documents[-1].metadata,
-                    )
-                )
-
-            splits = self.text_splitter.split_documents(processed_docs)
-            return splits
-        except Exception as e:
-            logger.error(f"Failed to load or split document {file_path}: {str(e)}")
-            raise ValueError(f"Failed to load or split document {file_path}: {str(e)}")
-
-    def load_web_page(self, url: str, bs_kwargs: dict | None = None) -> list[Document]:
-        """Fetch a URL and return its visible text as a LangChain document."""
-        response = requests.get(url, timeout=self.WEB_PAGE_TIMEOUT_SECONDS)
-        response.raise_for_status()
-        soup = bs4.BeautifulSoup(response.text, "html.parser", **(bs_kwargs or {}))
-        for element in soup(["script", "style", "nav", "header", "footer"]):
-            element.decompose()
-        content_root = soup.find("article") or soup.find("main") or soup.body or soup
-        text = content_root.get_text(separator="\n", strip=True)
-        return [Document(page_content=text, metadata={"source": url})]
-
-    def get_doc_splits_from_web(
-        self,
-        urls: list[str],
-        *,
-        bs_kwargs: dict | None = None,
-    ) -> List[Document]:
-        if not urls:
-            raise ValueError("At least one URL is required")
-
-        try:
-            documents: list[Document] = []
-            for url in urls:
-                if not url or not url.strip():
-                    raise ValueError("URL cannot be empty or whitespace")
-                documents.extend(self.load_web_page(url.strip(), bs_kwargs=bs_kwargs))
-
-            splits = self.text_splitter.split_documents(documents)
-            return splits
-        except ValueError:
-            raise
-        except Exception as e:
-            logger.error(f"Failed to load or split web documents from {urls}: {str(e)}")
-            raise ValueError(f"Failed to load or split web documents: {str(e)}") from e
+        return self.extractor.extract_file(file_path)
 
     def get_valid_splits(self, splits: List[Document]) -> List[Document]:
         valid_splits = []
@@ -226,16 +122,8 @@ class ChromaService:
                 valid_splits.append(split)
                 continue
 
-            try:
-                len_check = split.page_content.strip() and len(split.page_content) >= 5
-                embedding = self.embedding_function.embed_query(split.page_content)
-
-                if all([len_check, embedding is not None, any(embedding)]):
-                    valid_splits.append(split)
-
-            except Exception as e:
-                logger.error(f"Failed to process split: {str(e)}")
-                continue
+            if split.page_content.strip() and len(split.page_content) >= 5:
+                valid_splits.append(split)
 
         return valid_splits
 
@@ -292,11 +180,11 @@ class ChromaService:
     ) -> list[str]:
         """Upsert document chunks with deterministic IDs ``{source_pk}_{chunk_idx}``.
 
-        ``chunk_idx`` is the position of each document in the ``documents`` list
-        (0-based split order from the caller, e.g. pipeline output).
+        ``documents`` must already be chunked (splits). ``chunk_idx`` is the
+        position of each document in the provided list (0-based).
 
         How updates work: Chroma keys rows by ID, not by source document. When a
-        source row changes, the caller re-chunks the full row and calls this
+        source row changes, the caller re-extracts the full row and calls this
         again with the same ``source_pk``. Matching IDs are overwritten in place
         (text + embedding + metadata). Chroma does not detect which chunks
         changed — the whole chunk set for that ``source_pk`` is re-materialized.
@@ -386,53 +274,6 @@ class ChromaService:
                 status_code=500,
                 detail=f"Failed to index {os.path.basename(file_path)}: {str(e)}",
             )
-
-    def index_web_documents(
-        self,
-        urls: list[str],
-        *,
-        bs_kwargs: dict | None = None,
-    ) -> dict[str, str]:
-        try:
-            splits = self.get_doc_splits_from_web(urls, bs_kwargs=bs_kwargs)
-            valid_splits = self.get_valid_splits(splits)
-            response = {
-                "success": "0",
-                "error": "",
-            }
-
-            if not valid_splits:
-                response["error"] = "No valid document splits found."
-                return response
-
-            for split in valid_splits:
-                split.metadata = {
-                    k: str(v) if v is not None else ""
-                    for k, v in split.metadata.items()
-                }
-                split.metadata["document_type"] = "web"
-
-            filtered_splits = filter_complex_metadata(valid_splits)
-            self.vectorstore.add_documents(filtered_splits)
-            response["success"] = "1"
-            return response
-        except ValueError as e:
-            logger.error(f"Error indexing web documents from {urls}: {str(e)}")
-            raise HTTPException(status_code=400, detail=str(e))
-        except Exception as e:
-            logger.error(f"Error indexing web documents from {urls}: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to index web documents: {str(e)}",
-            )
-
-    def delete_web_documents(self) -> bool:
-        try:
-            self.vectorstore._collection.delete(where={"document_type": "web"})
-            return True
-        except Exception as e:
-            logger.error(f"Error deleting web documents: {str(e)}")
-            return False
 
     def delete_document(self, file_id: int) -> bool:
         try:
