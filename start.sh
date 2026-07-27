@@ -53,7 +53,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-"$PYTHON" mcp_servers/init_hotels_db.py
+PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" mcp_servers/init_hotels_db.py
 
 free_port "$TOOLBOX_PORT"
 toolbox --config "$ROOT/mcp_servers/mcp_toolbox.yaml" --port "$TOOLBOX_PORT" \

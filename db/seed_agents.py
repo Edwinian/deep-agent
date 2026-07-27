@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from datetime import datetime, timezone
 
 from agents.ids import GENERAL_AGENT_ID, RAG_AGENT_ID, RESEARCH_AGENT_ID
 from constants.agent_name import AgentName
 from constants.function_name import FunctionName
 from constants.model_name import ModelName
+from db.sqlite_service import SqliteService
 from prompts import (
     FILE_USAGE_INSTRUCTIONS,
     GENERATE_ANSWER,
@@ -86,14 +86,14 @@ def _build_rag_system_prompt() -> str:
     return RAG_AGENT_INSTRUCTIONS.rstrip() + "\n\n" + PII_GUARDRAILS
 
 
-def seed_default_agents(conn: sqlite3.Connection) -> None:
+def seed_default_agents(db: SqliteService) -> None:
     """Insert default research and general agent configuration."""
     research_prompt = _build_research_system_prompt()
     general_prompt = _build_general_system_prompt()
     rag_prompt = _build_rag_system_prompt()
     now = datetime.now(timezone.utc).isoformat()
 
-    conn.executemany(
+    db.executemany(
         "INSERT INTO SystemPrompt (id, name, content, created_at) VALUES (?, ?, ?, ?)",
         [
             (RESEARCH_SYSTEM_PROMPT_ID, AgentName.RESEARCH_AGENT, research_prompt, now),
@@ -105,7 +105,7 @@ def seed_default_agents(conn: sqlite3.Connection) -> None:
         ],
     )
 
-    conn.executemany(
+    db.executemany(
         """
         INSERT INTO Agent (
             id,

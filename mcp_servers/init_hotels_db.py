@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
-import sqlite3
+import sys
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "toolbox_hotels.db"
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from db.sqlite_service import SqliteService
+
+DB_PATH = _PROJECT_ROOT / "data" / "toolbox_hotels.db"
 
 _HOTELS = (
     (1, "Hilton Basel", "Basel", "Luxury", 0),
@@ -17,9 +23,9 @@ _HOTELS = (
 def init_hotels_db(db_path: Path | None = None) -> Path:
     """Create the hotels table and seed sample rows."""
     path = db_path or DB_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
+    db = SqliteService(str(path))
 
-    with sqlite3.connect(path) as conn:
+    with db as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS hotels(
@@ -38,7 +44,6 @@ def init_hotels_db(db_path: Path | None = None) -> Path:
             """,
             _HOTELS,
         )
-        conn.commit()
 
     return path
 

@@ -12,7 +12,6 @@ from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
 
 from constants.model_name import ModelName
-from rag_pipeline import RagPipeline
 
 # Configure logging
 logging.basicConfig(filename="app.log", level=logging.INFO)
@@ -36,10 +35,6 @@ class ChromaService:
         chunk_size: int = 500,
         chunk_overlap: int = 100,
     ):
-        self.extractor = RagPipeline(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-        )
         self.embedding_function = HuggingFaceEmbeddings(model_name=embedding_model)
         self.collection_name = collection_name or os.getenv("CHROMA_COLLECTION_NAME")
         self.vectorstore = Chroma(
@@ -111,21 +106,6 @@ class ChromaService:
 
         return formatted_name
 
-    def get_doc_splits_from_file(self, file_path: str) -> List[Document]:
-        return self.extractor.extract_file(file_path)
-
-    def get_valid_splits(self, splits: List[Document]) -> List[Document]:
-        valid_splits = []
-
-        for split in splits:
-            if split.page_content.startswith("IMAGE_CONTENT:"):
-                valid_splits.append(split)
-                continue
-
-            if split.page_content.strip() and len(split.page_content) >= 5:
-                valid_splits.append(split)
-
-        return valid_splits
 
     def find_similarity_score(self, text1: str, text2: str) -> float:
         """
@@ -176,37 +156,44 @@ class ChromaService:
     def upsert_documents(
         self,
         documents: List[Document],
-        source_pk: int | str,
+        source: str,
     ) -> list[str]:
-        """Upsert document chunks with deterministic IDs ``{source_pk}_{chunk_idx}``.
+        """Upsert chunk documents using the chunk's own ID.
 
-        ``documents`` must already be chunked (splits). ``chunk_idx`` is the
-        position of each document in the provided list (0-based).
+        This assumes ``documents`` are already chunks from the extraction layer
+        (e.g. ``rag_pipeline``), each with a deterministic ``id`` and ``source``
+        in metadata.
 
-        How updates work: Chroma keys rows by ID, not by source document. When a
-        source row changes, the caller re-extracts the full row and calls this
-        again with the same ``source_pk``. Matching IDs are overwritten in place
-        (text + embedding + metadata). Chroma does not detect which chunks
-        changed — the whole chunk set for that ``source_pk`` is re-materialized.
-        If the new split has fewer chunks, leftover higher ``chunk_idx`` IDs are
-        deleted so stale vectors are not left behind.
+        Update semantics: Chroma keys rows by ID. For each provided chunk ID,
+        Chroma inserts if missing, otherwise overwrites the stored text,
+        embedding, and metadata. After upsert, we delete stale chunks previously
+        stored under the same ``source`` but not present in the current list.
         """
         if not documents:
             raise ValueError("documents cannot be empty")
 
         try:
-            pk = str(source_pk)
-            for chunk_idx, document in enumerate(documents):
-                metadata = {
-                    k: str(v) if v is not None else ""
+            for document in documents:
+                document.metadata = {
+                    k: str(v)
                     for k, v in (document.metadata or {}).items()
+                    if v is not None
                 }
-                metadata["source_pk"] = pk
-                metadata["chunk_idx"] = str(chunk_idx)
-                document.metadata = metadata
 
             filtered = filter_complex_metadata(documents)
-            ids = [f"{pk}_{document.metadata['chunk_idx']}" for document in filtered]
+
+            # Prefer Document.id, fall back to metadata["id"].
+            ids: list[str] = []
+            for document in filtered:
+                doc_id = getattr(document, "id", None) or (document.metadata or {}).get(
+                    "id"
+                )
+                if not doc_id:
+                    raise ValueError(
+                        "Missing deterministic chunk ID (document.id or metadata['id'])."
+                    )
+                ids.append(str(doc_id))
+
             texts = [document.page_content for document in filtered]
             metadatas = [document.metadata for document in filtered]
             embeddings = self.embedding_function.embed_documents(texts)
@@ -219,7 +206,7 @@ class ChromaService:
 
             # Drop leftover chunks if this source now has fewer splits.
             existing = self.vectorstore._collection.get(
-                where={"source_pk": pk},
+                where={"source": source},
                 include=[],
             )
             stale_ids = [
@@ -235,52 +222,19 @@ class ChromaService:
             raise
         except Exception as e:
             logger.error(
-                f"Error upserting documents for source_pk {source_pk}: {str(e)}"
+                f"Error upserting documents for source {source}: {str(e)}"
             )
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to upsert documents for source_pk {source_pk}: {str(e)}",
+                detail=f"Failed to upsert documents for source {source}: {str(e)}",
             )
 
-    def index_document(self, file_path: str, file_id: int) -> dict[str, str]:
+    def delete_document(self, source: str) -> bool:
         try:
-            splits = self.get_doc_splits_from_file(file_path)
-            valid_splits = self.get_valid_splits(splits)
-            response = {
-                "success": "0",
-                "error": "",
-            }
-
-            if not valid_splits:
-                response["error"] = "No valid document splits found."
-                return response
-
-            for split in valid_splits:
-                split.metadata["file_id"] = file_id
-                split.metadata = {
-                    k: str(v) if v is not None else ""
-                    for k, v in split.metadata.items()
-                }
-
-            if valid_splits:
-                filtered_splits = filter_complex_metadata(valid_splits)
-                self.vectorstore.add_documents(filtered_splits)
-                response["success"] = "1"
-
-            return response
-        except Exception as e:
-            logger.error(f"Error indexing document with file_id {file_id}: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to index {os.path.basename(file_path)}: {str(e)}",
-            )
-
-    def delete_document(self, file_id: int) -> bool:
-        try:
-            self.vectorstore._collection.delete(where={"file_id": file_id})
+            self.vectorstore._collection.delete(where={"source": source})
             return True
         except Exception as e:
-            logger.error(f"Error deleting document with file_id {file_id}: {str(e)}")
+            logger.error(f"Error deleting documents for source {source}: {str(e)}")
             return False
 
     def get_all_collections(self) -> List[str]:

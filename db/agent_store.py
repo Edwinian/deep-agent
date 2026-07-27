@@ -8,6 +8,8 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+from db.sqlite_service import SqliteService
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 AGENT_DB_CONN_STRING = os.getenv(
     "AGENT_DB_CONN_STRING",
@@ -55,18 +57,13 @@ class AgentRow(BaseRow):
     skill_ids: list[int] | None
 
 
-def _ensure_parent_dir(conn_string: str) -> None:
-    db_path = Path(conn_string)
-    if db_path.suffix:
-        db_path.parent.mkdir(parents=True, exist_ok=True)
+def _sqlite(conn_string: str | None = None) -> SqliteService:
+    return SqliteService(conn_string or AGENT_DB_CONN_STRING)
 
 
 def _connect(conn_string: str | None = None) -> sqlite3.Connection:
-    resolved = conn_string or AGENT_DB_CONN_STRING
-    _ensure_parent_dir(resolved)
-    conn = sqlite3.connect(resolved, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Open a SQLite connection via :class:`SqliteService`."""
+    return _sqlite(conn_string).connect()
 
 
 def _parse_id_list(raw: str, *, field_name: str) -> list[int]:
@@ -537,8 +534,8 @@ def _migrate_general_agent_prompt(conn: sqlite3.Connection) -> None:
 
 def init_agent_db(conn_string: str | None = None) -> None:
     """Create agent tables and seed defaults when empty."""
-    conn = _connect(conn_string)
-    try:
+    db = _sqlite(conn_string)
+    with db as conn:
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS SystemPrompt (
@@ -575,7 +572,6 @@ def init_agent_db(conn_string: str | None = None) -> None:
             );
             """
         )
-        conn.commit()
         _migrate_timestamp_columns(conn)
         _migrate_agent_table(conn)
         _migrate_skill_schema(conn)
@@ -588,29 +584,30 @@ def init_agent_db(conn_string: str | None = None) -> None:
         _migrate_rag_tool_prompts(conn)
         _migrate_general_agent_prompt(conn)
         _migrate_rag_agent_description(conn)
-        conn.commit()
 
         count = conn.execute("SELECT COUNT(*) FROM Agent").fetchone()[0]
-        if count == 0:
-            from db.seed_agents import seed_default_agents
+        needs_seed = count == 0
 
-            seed_default_agents(conn)
-            conn.commit()
+    if needs_seed:
+        from db.seed_agents import seed_default_agents
 
-        # Migrate the seeded default model for existing databases.
-        #
-        # Older versions used a reasoning-oriented Grok model which can emit
-        # incomplete tool-call arguments (e.g. `{}`), causing tool validation
-        # failures. Keep existing DBs working without manual intervention.
-        from datetime import datetime, timezone
+        seed_default_agents(db)
 
-        from agents.ids import GENERAL_AGENT_ID, RAG_AGENT_ID, RESEARCH_AGENT_ID
-        from constants.model_name import ModelName
+    # Migrate the seeded default model for existing databases.
+    #
+    # Older versions used a reasoning-oriented Grok model which can emit
+    # incomplete tool-call arguments (e.g. `{}`), causing tool validation
+    # failures. Keep existing DBs working without manual intervention.
+    from datetime import datetime, timezone
 
-        now = datetime.now(timezone.utc).isoformat()
-        target_model = ModelName.GROK_4_FAST_NON_REASONING.with_provider()
-        legacy_model = ModelName.GROK_4_3.with_provider()
+    from agents.ids import GENERAL_AGENT_ID, RAG_AGENT_ID, RESEARCH_AGENT_ID
+    from constants.model_name import ModelName
 
+    now = datetime.now(timezone.utc).isoformat()
+    target_model = ModelName.GROK_4_FAST_NON_REASONING.with_provider()
+    legacy_model = ModelName.GROK_4_3.with_provider()
+
+    with db as conn:
         conn.execute(
             """
             UPDATE Agent
@@ -618,11 +615,15 @@ def init_agent_db(conn_string: str | None = None) -> None:
             WHERE id IN (?, ?, ?)
               AND model = ?
             """,
-            (target_model, now, RESEARCH_AGENT_ID, GENERAL_AGENT_ID, RAG_AGENT_ID, legacy_model),
+            (
+                target_model,
+                now,
+                RESEARCH_AGENT_ID,
+                GENERAL_AGENT_ID,
+                RAG_AGENT_ID,
+                legacy_model,
+            ),
         )
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def get_system_prompt(
