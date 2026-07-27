@@ -1,6 +1,6 @@
 """RAG extraction layer.
 
-Web, file, and poll-based SQLite extract. Future: CDC push extract.
+Web, file, poll-based SQLite extract, and CDC push extract.
 Transform (chunk/validate) and Chroma load live in ``chroma_service.ChromaService``.
 """
 
@@ -11,7 +11,7 @@ import os
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any, Literal, Mapping, Sequence
 from urllib.parse import urlparse
 
 import bs4
@@ -31,18 +31,49 @@ logger = logging.getLogger(__name__)
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+CdcOp = Literal["c", "u", "d", "r", "create", "insert", "update", "delete", "read"]
+
+_CDC_ADD_OPS = frozenset({"c", "r", "create", "insert", "read"})
+_CDC_UPDATE_OPS = frozenset({"u", "update"})
+_CDC_DELETE_OPS = frozenset({"d", "delete"})
+
 
 @dataclass
 class PollDbData:
-    """Result of a poll-based SQLite extract for one collection."""
+    """Result of a DB extract (poll or CDC push) for one collection."""
 
     add: list[Document] = field(default_factory=list)
     update: list[Document] = field(default_factory=list)
     delete: list[Document] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class CdcEvent:
+    """One row change in a typical CDC envelope (Debezium-style).
+
+    Expected shape from a CDC bus / Debezium payload::
+
+        {
+          "op": "c" | "u" | "d" | "r",
+          "before": { ... } | null,
+          "after":  { ... } | null,
+          "source": { "table": "<table>", ... },
+          "ts_ms": 1710000000000
+        }
+
+    ``source_table`` may be passed explicitly or taken from ``source["table"]``.
+    """
+
+    op: CdcOp
+    source_table: str
+    after: Mapping[str, Any] | None = None
+    before: Mapping[str, Any] | None = None
+    ts_ms: int | None = None
+    source: Mapping[str, Any] | None = None
+
+
 class RagPipeline:
-    """Extract documents from sources (web, files; later DB poll / CDC)."""
+    """Extract documents from sources (web, files, DB poll, CDC push)."""
 
     WEB_PAGE_TIMEOUT_SECONDS = 20
 
@@ -86,6 +117,17 @@ class RagPipeline:
         """Stable Chroma ``source`` value for a source-table row."""
         return f"{source_table}:{source_pk}"
 
+    @staticmethod
+    def _row_get(
+        row: Mapping[str, Any] | sqlite3.Row,
+        key: str,
+        default: Any = None,
+    ) -> Any:
+        try:
+            return row[key]
+        except (KeyError, IndexError):
+            return default
+
     def _get_chunks(self, docs: list[Document], source: str) -> list[Document]:
         """Split documents and assign deterministic chunk IDs from ``source``."""
         chunks = self.text_splitter.split_documents(docs)
@@ -99,7 +141,7 @@ class RagPipeline:
 
     def _row_to_document(
         self,
-        row: sqlite3.Row,
+        row: Mapping[str, Any] | sqlite3.Row,
         *,
         source_table: str,
         pk_column: str,
@@ -107,13 +149,20 @@ class RagPipeline:
         doc_type: str = "db",
     ) -> Document:
         """Build one Document from a source row (before chunking)."""
-        source_pk = row[pk_column]
+        source_pk = self._row_get(row, pk_column)
+        if source_pk is None:
+            raise ValueError(
+                f"Missing pk column {pk_column!r} for table {source_table!r}"
+            )
         source = self._source_key(source_table, source_pk)
-        parts = [
-            str(row[col]).strip()
-            for col in content_columns
-            if row[col] is not None and str(row[col]).strip()
-        ]
+        parts: list[str] = []
+        for col in content_columns:
+            value = self._row_get(row, col)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                parts.append(text)
         page_content = "\n\n".join(parts)
         metadata: dict[str, Any] = {
             "source": source,
@@ -125,7 +174,7 @@ class RagPipeline:
 
     def _rows_to_chunks(
         self,
-        rows: list[sqlite3.Row],
+        rows: Sequence[Mapping[str, Any] | sqlite3.Row],
         *,
         source_table: str,
         pk_column: str,
@@ -144,6 +193,56 @@ class RagPipeline:
             source = str(doc.metadata["source"])
             chunks.extend(self._get_chunks([doc], source))
         return chunks
+
+    def _delete_document(
+        self,
+        *,
+        source_table: str,
+        source_pk: Any,
+        collection: str,
+    ) -> Document:
+        return Document(
+            page_content="",
+            metadata={
+                "source": self._source_key(source_table, source_pk),
+                "source_table": source_table,
+                "source_pk": str(source_pk),
+                "collection": collection,
+                "type": "db_delete",
+            },
+        )
+
+    def _resolve_content_columns(
+        self,
+        row_keys: set[str],
+        *,
+        source_table: str,
+        content_columns_by_table: Mapping[str, Sequence[str]],
+        pk_column: str,
+        updated_at_column: str,
+        deleted_at_column: str,
+    ) -> list[str]:
+        explicit = content_columns_by_table.get(source_table)
+        if explicit is not None:
+            return list(explicit)
+        return self._infer_content_columns(
+            row_keys,
+            pk_column=pk_column,
+            updated_at_column=updated_at_column,
+            deleted_at_column=deleted_at_column,
+        )
+
+    def _cdc_is_soft_delete(
+        self,
+        after: Mapping[str, Any] | None,
+        *,
+        deleted_at_column: str,
+    ) -> bool:
+        if after is None:
+            return False
+        if deleted_at_column not in after:
+            return False
+        return after[deleted_at_column] is not None
 
     def _get_new_rows_from_db(
         self,
@@ -420,17 +519,10 @@ class RagPipeline:
                     content_columns=content_columns,
                 )
                 delete_docs = [
-                    Document(
-                        page_content="",
-                        metadata={
-                            "source": self._source_key(
-                                source_table, row["source_pk"]
-                            ),
-                            "source_table": source_table,
-                            "source_pk": str(row["source_pk"]),
-                            "collection": collection,
-                            "type": "db_delete",
-                        },
+                    self._delete_document(
+                        source_table=source_table,
+                        source_pk=row["source_pk"],
+                        collection=collection,
                     )
                     for row in delete_rows
                 ]
@@ -440,6 +532,146 @@ class RagPipeline:
                     delete=delete_docs,
                 )
             return results
+
+    @staticmethod
+    def _coerce_cdc_event(event: CdcEvent | Mapping[str, Any]) -> CdcEvent:
+        """Normalize a Debezium-style CDC dict or :class:`CdcEvent`."""
+        if isinstance(event, CdcEvent):
+            return event
+
+        source = event.get("source")
+        source_map = source if isinstance(source, Mapping) else None
+        source_table = event.get("source_table") or (
+            source_map.get("table") if source_map else None
+        )
+        if not source_table:
+            raise ValueError(
+                "CDC event missing source_table "
+                "(expected top-level source_table or source.table)"
+            )
+
+        op = event.get("op")
+        if not op:
+            raise ValueError("CDC event missing op")
+
+        after = event.get("after")
+        before = event.get("before")
+        ts_ms = event.get("ts_ms")
+        return CdcEvent(
+            op=op,  # type: ignore[arg-type]
+            source_table=str(source_table),
+            after=after if isinstance(after, Mapping) else None,
+            before=before if isinstance(before, Mapping) else None,
+            ts_ms=int(ts_ms) if ts_ms is not None else None,
+            source=source_map,
+        )
+
+    def push_db(
+        self,
+        events: Sequence[CdcEvent | Mapping[str, Any]],
+        *,
+        content_columns_by_table: dict[str, Sequence[str]] | None = None,
+        pk_column: str = "id",
+        updated_at_column: str = "updated_at",
+        deleted_at_column: str = "deleted_at",
+    ) -> dict[str, PollDbData]:
+        """Convert CDC row-change events into extract deltas keyed by collection.
+
+        Intended to be called from a CDC consumer (e.g. Debezium / Kafka).
+        Does **not** write to Chroma or update ``rag_sync``.
+
+        Each event follows a typical CDC envelope::
+
+            {
+              "op": "c" | "u" | "d" | "r",   # also: create/insert/update/delete/read
+              "before": { ... } | null,      # pre-image (required for deletes)
+              "after":  { ... } | null,      # post-image (required for c/u/r)
+              "source": { "table": "<name>", ... },
+              "ts_ms": 1710000000000
+            }
+
+        Soft-deleted updates (``after.deleted_at`` set) are routed to ``delete``.
+        Collection key equals ``source_table``.
+        """
+        content_columns_by_table = content_columns_by_table or {}
+        results: dict[str, PollDbData] = {}
+
+        for raw in events:
+            event = self._coerce_cdc_event(raw)
+            op = str(event.op).lower()
+            source_table = event.source_table
+            collection = source_table
+            bucket = results.setdefault(collection, PollDbData())
+
+            if op in _CDC_DELETE_OPS or self._cdc_is_soft_delete(
+                event.after, deleted_at_column=deleted_at_column
+            ):
+                row = event.before if op in _CDC_DELETE_OPS else event.after
+                # Hard delete: pk lives on before; soft delete: on after.
+                if row is None:
+                    row = event.before or event.after
+                if row is None or pk_column not in row:
+                    logger.warning(
+                        "Skipping CDC delete for %s: missing row/%s",
+                        source_table,
+                        pk_column,
+                    )
+                    continue
+                bucket.delete.append(
+                    self._delete_document(
+                        source_table=source_table,
+                        source_pk=row[pk_column],
+                        collection=collection,
+                    )
+                )
+                continue
+
+            if op not in _CDC_ADD_OPS and op not in _CDC_UPDATE_OPS:
+                logger.warning(
+                    "Skipping CDC event for %s: unknown op %r",
+                    source_table,
+                    event.op,
+                )
+                continue
+
+            row = event.after
+            if row is None or pk_column not in row:
+                logger.warning(
+                    "Skipping CDC %s for %s: missing after/%s",
+                    op,
+                    source_table,
+                    pk_column,
+                )
+                continue
+
+            content_columns = self._resolve_content_columns(
+                set(row.keys()),
+                source_table=source_table,
+                content_columns_by_table=content_columns_by_table,
+                pk_column=pk_column,
+                updated_at_column=updated_at_column,
+                deleted_at_column=deleted_at_column,
+            )
+            if not content_columns:
+                logger.warning(
+                    "Skipping CDC %s for %s: no content columns",
+                    op,
+                    source_table,
+                )
+                continue
+
+            chunks = self._rows_to_chunks(
+                [row],
+                source_table=source_table,
+                pk_column=pk_column,
+                content_columns=content_columns,
+            )
+            if op in _CDC_ADD_OPS:
+                bucket.add.extend(chunks)
+            else:
+                bucket.update.extend(chunks)
+
+        return results
 
     def _get_web_page_documents(self, url: str, bs_kwargs: dict | None = None) -> list[Document]:
         response = requests.get(url, timeout=self.WEB_PAGE_TIMEOUT_SECONDS)
