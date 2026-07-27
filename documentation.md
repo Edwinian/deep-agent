@@ -20,6 +20,7 @@ This document is written for engineers and interviewers who want to understand w
 10. [Supporting production features](#supporting-production-features)
 11. [API surface](#api-surface)
 12. [Environment variables](#environment-variables)
+13. [Interview summary (CV talking points)](#interview-summary-cv-talking-points)
 
 ---
 
@@ -590,3 +591,104 @@ cd frontend && npm install && npm run dev
 | Tracing | `utils/tracing.py`, `utils/langfuse_tracing.py` |
 | Streaming | `modules/chats/stream_service.py`, `schemas/invoke_response.py` |
 | Compilation | `utils/compile_agent.py`, `utils/compile_subagents.py` |
+
+---
+
+## Interview summary (CV talking points)
+
+Point-form walkthrough of each feature — use these steps when explaining the system in interviews.
+
+### System overview
+
+- Built a production multi-agent stack: LangGraph orchestration, FastAPI API, Next.js chat UI.
+- Persisted agent config in SQLite; conversation state in LangGraph checkpointers; RAG corpus in ChromaDB.
+- Wired dual observability (Langfuse + LangSmith) and Tavily for live web research.
+- Seeded three agents: `general_agent` (orchestrator), `research_agent` (web), `rag_agent` (vector DB).
+
+### Architecture
+
+- Frontend posts to FastAPI; chats resolve to a compiled LangGraph via `InvokeService` / `StreamService`.
+- Compilation: load agent from SQLite → recursively compile sub-agents → `create_deep_agent()` with tools, HITL, PII middleware, checkpointer → cache by `agent_id`.
+- Shared graph state: `messages`, `todos`, and virtual `files` (context offloading via `file_reducer`).
+- Orchestrator delegates to leaf agents through the `task` tool; leaves call Tavily or Chroma and return results.
+
+### Agent model
+
+- General agent system prompt combines TODOs, virtual filesystem, sub-agent delegation rules, and PII guardrails.
+- Mounted MCP tool groups (weather, math, hotel) on the orchestrator.
+- Delegation: orchestrator calls `task(description, subagent_type)` → isolated sub-agent context → tool use → concise answer back to orchestrator.
+- Design: quarantined sub-agent context, up to 3 parallel `task` calls, middleware to repair empty tool-call args from the LLM.
+
+### Human-in-the-loop (HITL)
+
+**Backend**
+
+- Mark sensitive tools in `DEFAULT_INTERRUPT_ON` (e.g. `web_search_tool`, `book-hotel`); pass `interrupt_on` into `create_deep_agent`.
+- Model selects a tool → `HumanInTheLoopMiddleware` interrupts → checkpointer stores `__interrupt__` + pending action requests.
+- Stream emits SSE `kind: interrupt` with `action_requests` / interrupt IDs.
+- Client resumes with `permissions` (approve / edit / reject / respond) on the same `thread_id`.
+- `build_resume_command()` maps permissions → LangChain decisions keyed by interrupt ID (supports nested subgraph interrupts).
+- Graph continues: execute or skip tools per decision; stream finishes normally.
+
+**Frontend**
+
+- `ChatClient` receives interrupt chunk → renders HITL panel (approve / edit / reject / respond per tool).
+- User submits → `POST /chats/stream` with `permissions` only (no new user message).
+- History reload restores pending interrupts if the user refreshes mid-approval.
+- CLI helpers (`permit.py`, `permit_stream.py`) exercise the same loop without the UI.
+
+### Research agents
+
+- General agent routes live/time-sensitive questions to `research_agent` via `task`.
+- Research agent loops: `web_search_tool` → optional HITL → Tavily → summarize → offload full results to `/_sources.json` → `think_tool` → more searches or final answer.
+- Pipeline: search → HTML/markdown processing → context offloading → `Source` metadata for the UI sources pill.
+- Prompt rules: short search queries, `topic=news` for live events, search budgets, no inline citations (sources shown in UI).
+
+### RAG (retrieval-augmented generation)
+
+- Index docs with `ChromaService`: HuggingFace embeddings, chunk/split, persist to `./chroma_db` (web URLs, PDF, DOCX, etc.).
+- General agent routes vector-DB questions to `rag_agent` via `task`.
+- `retrieve_tool` runs agentic RAG: retrieve → grade relevance → rewrite query + re-retrieve once if needed → generate grounded answer.
+- Grade / rewrite / generate prompts live in SQLite and are editable via the System Prompts admin UI.
+- RAG helpers use a smaller model; orchestration agents use a stronger model for reliable tool args.
+
+### Checkpointing and conversation history
+
+- Every turn scoped by `thread_id`; `AsyncSqliteSaver` persists messages, todos, files, and HITL payloads after each superstep.
+- Startup initializes a process-wide SQLite checkpointer; agents compile with it attached.
+- New message: stream with `thread_id` → graph writes checkpoints → client can `GET /chats/get-history/{thread_id}`.
+- History rebuild: walk checkpoint messages → reconstruct bubbles with tools, reasoning, sources, and pending interrupts.
+- Lifecycle: rewind last turn (regenerate), delete thread (checkpoints + optional Daytona sandbox), block delete while awaiting HITL.
+
+### Tracing: Langfuse and LangSmith
+
+- `init_tracing()` at app import; enabled only when API keys / flags are set.
+- Each graph run: `with_tracing_config()` attaches Langfuse callback + LangSmith auto-tracing with `thread_id` / `agent_id` metadata.
+- HTTP middleware wraps non-SSE requests into request-level spans; SSE stream path is excluded so streaming is not buffered.
+- `@trace` decorator on RAG helpers (grade, rewrite, generate) for function-level spans.
+- Demo story: full agent→tool→sub-agent tree in LangSmith; session-grouped traces in Langfuse by `thread_id`.
+
+### Streaming (SSE)
+
+- `POST /chats/stream` uses LangGraph `astream_events(v3)` and projects a typed SSE protocol.
+- Chunk kinds: text/reasoning deltas, tool start/finish, subagent boundaries, system status, interrupt, message/run finished (with reply + sources).
+- `StreamService` merges parallel event streams and deduplicates status lines.
+- Cancel endpoint aborts the in-flight async stream by `thread_id`.
+
+### Supporting production features
+
+- Virtual filesystem / context offloading in state `files`; optional Daytona sandbox per thread when enabled.
+- Skills CRUD + sync skill markdown into the agent backend before each run.
+- PII middleware redacts email/CC/IP/MAC on input, output, and tool results; blocks treating redaction tokens as real data.
+- MCP adapters load weather/math/hotel tools; optional Bearer token forwarded into MCP context.
+- Speech-to-text via AssemblyAI for voice input; admin UI for agents, prompts, and skills.
+
+### API surface
+
+- Chat: invoke, stream, cancel, get-history, rewind, delete-thread, speech-to-text.
+- Admin: agents, skills, system-prompts CRUD under matching route prefixes.
+
+### Environment variables / quick start
+
+- Required keys: Tavily, Anthropic and/or xAI; optional LangSmith, Langfuse, Chroma collection, Daytona, AssemblyAI.
+- Local demo path: venv + requirements → seed RAG corpus → run `main.py` → Next.js frontend → interview flows (HITL research, RAG, history restore, tracing).

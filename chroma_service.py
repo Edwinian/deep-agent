@@ -60,7 +60,6 @@ class ChromaService:
                 "",
             ],
         )
-
         self.collection_name = collection_name or os.getenv("CHROMA_COLLECTION_NAME")
         self.vectorstore = Chroma(
             collection_name=self.format_collection_name(self.collection_name),
@@ -240,6 +239,121 @@ class ChromaService:
 
         return valid_splits
 
+    def find_similarity_score(self, text1: str, text2: str) -> float:
+        """
+        Compute the cosine similarity score between two strings.
+
+        Args:
+            text1: First string input (e.g., user query)
+            text2: Second string input (e.g., model answer)
+
+        Returns:
+            Cosine similarity score between -1 and 1, where:
+            - 1 indicates identical semantic meaning
+            - 0 indicates no similarity
+            - -1 indicates opposite meaning
+
+        Raises:
+            ValueError: If either input string is empty or embedding fails
+        """
+        if not text1 or not text1.strip():
+            raise ValueError("text1 cannot be empty")
+        if not text2 or not text2.strip():
+            raise ValueError("text2 cannot be empty")
+
+        try:
+            embedding1 = self.embedding_function.embed_query(text1)
+            embedding2 = self.embedding_function.embed_query(text2)
+
+            vec1 = np.array(embedding1)
+            vec2 = np.array(embedding2)
+
+            dot_product = np.dot(vec1, vec2)
+            norm1 = np.linalg.norm(vec1)
+            norm2 = np.linalg.norm(vec2)
+
+            if norm1 == 0 or norm2 == 0:
+                logger.warning("One of the embeddings has zero norm")
+                return 0.0
+
+            similarity = dot_product / (norm1 * norm2)
+            similarity = np.clip(similarity, -1.0, 1.0)
+
+            return float(similarity)
+
+        except Exception as e:
+            logger.error(f"Error computing cosine similarity: {str(e)}")
+            raise ValueError(f"Failed to compute cosine similarity: {str(e)}")
+
+    def upsert_documents(
+        self,
+        documents: List[Document],
+        source_pk: int | str,
+    ) -> list[str]:
+        """Upsert document chunks with deterministic IDs ``{source_pk}_{chunk_idx}``.
+
+        ``chunk_idx`` is the position of each document in the ``documents`` list
+        (0-based split order from the caller, e.g. pipeline output).
+
+        How updates work: Chroma keys rows by ID, not by source document. When a
+        source row changes, the caller re-chunks the full row and calls this
+        again with the same ``source_pk``. Matching IDs are overwritten in place
+        (text + embedding + metadata). Chroma does not detect which chunks
+        changed — the whole chunk set for that ``source_pk`` is re-materialized.
+        If the new split has fewer chunks, leftover higher ``chunk_idx`` IDs are
+        deleted so stale vectors are not left behind.
+        """
+        if not documents:
+            raise ValueError("documents cannot be empty")
+
+        try:
+            pk = str(source_pk)
+            for chunk_idx, document in enumerate(documents):
+                metadata = {
+                    k: str(v) if v is not None else ""
+                    for k, v in (document.metadata or {}).items()
+                }
+                metadata["source_pk"] = pk
+                metadata["chunk_idx"] = str(chunk_idx)
+                document.metadata = metadata
+
+            filtered = filter_complex_metadata(documents)
+            ids = [f"{pk}_{document.metadata['chunk_idx']}" for document in filtered]
+            texts = [document.page_content for document in filtered]
+            metadatas = [document.metadata for document in filtered]
+            embeddings = self.embedding_function.embed_documents(texts)
+            self.vectorstore._collection.upsert(
+                ids=ids,
+                documents=texts,
+                metadatas=metadatas,
+                embeddings=embeddings,
+            )
+
+            # Drop leftover chunks if this source now has fewer splits.
+            existing = self.vectorstore._collection.get(
+                where={"source_pk": pk},
+                include=[],
+            )
+            stale_ids = [
+                doc_id
+                for doc_id in (existing.get("ids") or [])
+                if doc_id not in ids
+            ]
+            if stale_ids:
+                self.vectorstore._collection.delete(ids=stale_ids)
+
+            return ids
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(
+                f"Error upserting documents for source_pk {source_pk}: {str(e)}"
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to upsert documents for source_pk {source_pk}: {str(e)}",
+            )
+
     def index_document(self, file_path: str, file_id: int) -> dict[str, str]:
         try:
             splits = self.get_doc_splits_from_file(file_path)
@@ -338,54 +452,3 @@ class ChromaService:
 
     def get_retriever(self) -> BaseRetriever:
         return self.vectorstore.as_retriever()
-
-    def find_similarity_score(self, text1: str, text2: str) -> float:
-        """
-        Compute the cosine similarity score between two strings.
-        
-        Args:
-            text1: First string input (e.g., user query)
-            text2: Second string input (e.g., model answer)
-            
-        Returns:
-            Cosine similarity score between -1 and 1, where:
-            - 1 indicates identical semantic meaning
-            - 0 indicates no similarity
-            - -1 indicates opposite meaning
-            
-        Raises:
-            ValueError: If either input string is empty or embedding fails
-        """
-        if not text1 or not text1.strip():
-            raise ValueError("text1 cannot be empty")
-        if not text2 or not text2.strip():
-            raise ValueError("text2 cannot be empty")
-        
-        try:
-            # Get embeddings for both strings
-            embedding1 = self.embedding_function.embed_query(text1)
-            embedding2 = self.embedding_function.embed_query(text2)
-            
-            # Convert to numpy arrays
-            vec1 = np.array(embedding1)
-            vec2 = np.array(embedding2)
-            
-            # Compute cosine similarity: dot product / (norm1 * norm2)
-            dot_product = np.dot(vec1, vec2)
-            norm1 = np.linalg.norm(vec1)
-            norm2 = np.linalg.norm(vec2)
-            
-            if norm1 == 0 or norm2 == 0:
-                logger.warning("One of the embeddings has zero norm")
-                return 0.0
-            
-            similarity = dot_product / (norm1 * norm2)
-            
-            # Ensure the result is within [-1, 1] range (should be, but clamp for safety)
-            similarity = np.clip(similarity, -1.0, 1.0)
-            
-            return float(similarity)
-            
-        except Exception as e:
-            logger.error(f"Error computing cosine similarity: {str(e)}")
-            raise ValueError(f"Failed to compute cosine similarity: {str(e)}")
