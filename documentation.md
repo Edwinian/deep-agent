@@ -11,16 +11,17 @@ This document is written for engineers and interviewers who want to understand w
 1. [System overview](#system-overview)
 2. [Architecture](#architecture)
 3. [Agent model](#agent-model)
-4. [Human-in-the-loop (HITL)](#human-in-the-loop-hitl)
-5. [Research agents](#research-agents)
-6. [RAG (retrieval-augmented generation)](#rag-retrieval-augmented-generation)
-7. [Checkpointing and conversation history](#checkpointing-and-conversation-history)
-8. [Tracing: Langfuse and LangSmith](#tracing-langfuse-and-langsmith)
-9. [Streaming (SSE)](#streaming-sse)
-10. [Supporting production features](#supporting-production-features)
-11. [API surface](#api-surface)
-12. [Environment variables](#environment-variables)
-13. [Interview summary (CV talking points)](#interview-summary-cv-talking-points)
+4. [Middleware](#middleware)
+5. [Human-in-the-loop (HITL)](#human-in-the-loop-hitl)
+6. [Research agents](#research-agents)
+7. [RAG (retrieval-augmented generation)](#rag-retrieval-augmented-generation)
+8. [Checkpointing and conversation history](#checkpointing-and-conversation-history)
+9. [Tracing: Langfuse and LangSmith](#tracing-langfuse-and-langsmith)
+10. [Streaming (SSE)](#streaming-sse)
+11. [Supporting production features](#supporting-production-features)
+12. [API surface](#api-surface)
+13. [Environment variables](#environment-variables)
+14. [Interview summary (CV talking points)](#interview-summary-cv-talking-points)
 
 ---
 
@@ -144,6 +145,22 @@ sequenceDiagram
 - Sub-agents have **quarantined context** — they cannot see each other's work; the orchestrator must pass complete standalone task descriptions (`prompts/subagent_usage_instructions.py`).
 - **Parallel delegation** — up to 3 concurrent `task` calls per iteration.
 - **Tool arg repair** — `ToolCallArgsRepairMiddleware` fills missing `task` / `web_search_tool` args when models emit empty JSON (`utils/task_tool_args_repair.py`).
+
+---
+
+## Middleware
+
+The standard execution flow for middleware is as follows:
+
+**beforeAgent:** Runs once at the very beginning of the entire agent invocation. You could use this for initial setup, like loading the user's role or permissions.
+
+**beforeModel:** Runs before the LLM is invoked for each step in the agent loop. This is useful for modifying the input prompt or state before the model processes it.
+
+**wrapModelCall:** Wraps the actual call to the LLM. This allows you to intercept the request and response at a very low level.
+
+**afterModel:** Runs immediately after the model generates a response but before any tools are called. This is the critical point for your RBAC check. At this stage, the model's decision (the `tool_calls`) is available, allowing you to inspect them and decide what to do (approve, reject, or request human approval for the tool call).
+
+**afterAgent:** Runs once at the very end of the agent invocation, after all model calls and tool executions are complete. This can be used for cleanup or logging the final state.
 
 ---
 
@@ -618,6 +635,12 @@ Point-form walkthrough of each feature — use these steps when explaining the s
 - Mounted MCP tool groups (weather, math, hotel) on the orchestrator.
 - Delegation: orchestrator calls `task(description, subagent_type)` → isolated sub-agent context → tool use → concise answer back to orchestrator.
 - Design: quarantined sub-agent context, up to 3 parallel `task` calls, middleware to repair empty tool-call args from the LLM.
+
+### Middleware
+
+- Hook order: `beforeAgent` → (`beforeModel` → `wrapModelCall` → `afterModel` → tools)* → `afterAgent`.
+- `beforeAgent` / `afterAgent`: once per invocation (setup / cleanup).
+- `beforeModel` / `wrapModelCall` / `afterModel`: each model step; `afterModel` is where RBAC / HITL inspects `tool_calls` before tools run.
 
 ### Human-in-the-loop (HITL)
 
