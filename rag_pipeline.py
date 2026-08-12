@@ -710,11 +710,11 @@ class RagPipeline:
         if not loader_class:
             raise ValueError(f"File loader not found: {file_path}")
 
-        if file_extension == ".txt":
+            if file_extension == ".txt":
             return loader_class(file_path)
 
-        loader = loader_class(file_path, mode="elements")
-        documents = loader.load()
+                loader = loader_class(file_path, mode="elements")
+                documents = loader.load()
         for document in documents:
             document.metadata["type"] = file_extension
         return documents
@@ -732,32 +732,32 @@ class RagPipeline:
             return []
 
         processed_docs: list[Document] = []
-        current_content = ""
+            current_content = ""
 
-        for doc in documents:
-            content = doc.page_content.strip()
+            for doc in documents:
+                content = doc.page_content.strip()
             if len(content) < min_fragment_len:
-                current_content += " " + content
+                    current_content += " " + content
                 continue
+
+                    if current_content:
+                        processed_docs.append(
+                            Document(
+                                page_content=current_content.strip(),
+                                metadata=doc.metadata,
+                            )
+                        )
+                        current_content = ""
+
+                    processed_docs.append(doc)
 
             if current_content:
                 processed_docs.append(
                     Document(
                         page_content=current_content.strip(),
-                        metadata=doc.metadata,
+                        metadata=documents[-1].metadata,
                     )
                 )
-                current_content = ""
-
-            processed_docs.append(doc)
-
-        if current_content:
-            processed_docs.append(
-                Document(
-                    page_content=current_content.strip(),
-                    metadata=documents[-1].metadata,
-                )
-            )
 
         return processed_docs
 
