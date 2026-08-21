@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from functools import lru_cache
 
 from langchain.tools import ToolRuntime
@@ -13,9 +12,9 @@ from typing_extensions import Annotated
 
 from chroma_service import ChromaService
 from tools.rag.generate_answer import generate_answer
-from tools.rag.grade_documents import GradeDocuments, grade_documents
-from tools.rag.rewrite_query import rewrite_query
+from utils.retry import retry_with_backoff
 from utils.tool_messages import text_tool_message
+from utils.tool_quality_retry import run_with_quality_retry
 
 RETRIEVE_TOOL_ID = 2008
 MAX_QUERY_REWRITES = 1
@@ -27,50 +26,13 @@ def _get_retriever() -> BaseRetriever:
     return service.get_retriever()
 
 
-def _retrieve_graded_context(
-    query: str,
-    *,
-    original_query: str,
-    rewrites_remaining: int,
-    on_status: Callable[[str], None] | None = None,
-) -> tuple[str | None, str | None]:
-    """Retrieve, grade, and optionally rewrite the query before re-retrieving.
-
-    Returns:
-        A tuple of (context, error_message). Exactly one value is set.
-    """
-    if on_status is not None:
-        on_status("Retrieving context from vector store…")
-
+def _retrieve_context(query: str) -> str:
+    """Fetch and join Chroma chunks for ``query`` (infra retries only)."""
     retriever = _get_retriever()
-    retrieved_docs = retriever.invoke(query)
+    retrieved_docs = retry_with_backoff(lambda: retriever.invoke(query))
     if not retrieved_docs:
-        return None, "No relevant documents found."
-
-    context = "\n\n".join(doc.page_content for doc in retrieved_docs)
-
-    if on_status is not None:
-        on_status("Grading retrieved context…")
-
-    grade = grade_documents(original_query, context)
-
-    if grade == GradeDocuments.REWRITE_QUERY:
-        if rewrites_remaining > 0:
-            if on_status is not None:
-                on_status("Context irrelevant, retry retrieving context…")
-            rewritten_query = rewrite_query(query)
-            return _retrieve_graded_context(
-                rewritten_query,
-                original_query=original_query,
-                rewrites_remaining=rewrites_remaining - 1,
-                on_status=on_status,
-            )
-        return (
-            None,
-            "Retrieved documents were not relevant to the query after rewriting it.",
-        )
-
-    return context, None
+        return ""
+    return "\n\n".join(doc.page_content for doc in retrieved_docs)
 
 
 @tool(parse_docstring=True)
@@ -81,8 +43,8 @@ def retrieve_tool(
 ) -> Command:
     """Search and return relevant passages from indexed documents.
 
-    Retrieves from ChromaDB, grades relevance against the query, rewrites and
-    retries retrieval when needed, then generates a concise grounded answer.
+    Retrieves from ChromaDB, evaluates output quality against the query, rewrites
+    and retries when quality is low, then generates a concise grounded answer.
 
     Args:
         query: Natural language search query.
@@ -96,24 +58,30 @@ def retrieve_tool(
     def _status(message: str) -> None:
         runtime.emit_output_delta(message)
 
-    context, error = _retrieve_graded_context(
+    quality = run_with_quality_retry(
         query,
-        original_query=query,
-        rewrites_remaining=MAX_QUERY_REWRITES,
+        _retrieve_context,
+        tool_name="retrieve_tool",
+        max_retries=MAX_QUERY_REWRITES,
         on_status=_status,
     )
 
-    if error is not None:
+    if not quality.ok:
         return Command(
             update={
                 "messages": [
-                    text_tool_message(error, tool_call_id, status="error"),
+                    text_tool_message(
+                        quality.error
+                        or "No relevant documents found.",
+                        tool_call_id,
+                        status="error",
+                    ),
                 ],
             }
         )
 
     _status("Retrieved context, now answering user…")
-    answer = generate_answer(query, context or "")
+    answer = generate_answer(query, quality.output)
     return Command(
         update={
             "messages": [

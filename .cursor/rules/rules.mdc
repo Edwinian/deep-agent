@@ -13,3 +13,5 @@ When adding a new agent to agents folder, add it to the agent_registry
 When adding a new tool to tools folder, add it to the interrupt_on dict with false value
 
 Install the Langfuse AI skill from github.com/langfuse/skills and use it to add tracing to this application with Langfuse following best practices.
+
+Whenever you have added/updated a feature, check documentation.md and update it if the change is not reflected in it.

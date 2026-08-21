@@ -13,8 +13,20 @@ from tools.think.think_tool import THINK_TOOL_ID, think_tool
 from tools.todo.todo_tools import READ_TODOS_TOOL_ID, read_todos
 from tools.weather.get_weather_mcp_tools import WEATHER_MCP_TOOLS_ID, get_weather_mcp_tools
 from tools.web_search.web_search_tool import WEB_SEARCH_TOOL_ID, web_search_tool
+from utils.retry import wrap_tool_with_retry
+from utils.tool_quality_retry import wrap_tool_with_quality_retry
 
 ToolLoader = Callable[[str | None], Awaitable[list[BaseTool]]]
+
+# Network / MCP-backed toolsets: infra backoff + optional semantic quality retry.
+# Quality wrap no-ops when the tool args lack a query-like string field.
+_RETRYABLE_TOOLSET_IDS = frozenset(
+    {
+        WEATHER_MCP_TOOLS_ID,
+        MATH_MCP_TOOLS_ID,
+        HOTEL_TOOLS_ID,
+    }
+)
 
 
 def _static_tool_loader(tool: BaseTool) -> ToolLoader:
@@ -48,5 +60,11 @@ async def resolve_tools(
         loader = TOOL_REGISTRY.get(tool_id)
         if loader is None:
             raise KeyError(f"Unknown tool_id: {tool_id}")
-        tools.extend(await loader(token))
+        loaded = await loader(token)
+        if tool_id in _RETRYABLE_TOOLSET_IDS:
+            loaded = [
+                wrap_tool_with_quality_retry(wrap_tool_with_retry(tool))
+                for tool in loaded
+            ]
+        tools.extend(loaded)
     return tools

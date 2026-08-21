@@ -26,7 +26,9 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt.tool_node import ToolNode
 from langgraph.types import Command, interrupt
 
+from utils.retry import wrap_tool_with_retry
 from utils.tool_messages import text_tool_message
+from utils.tool_quality_retry import wrap_tool_with_quality_retry
 
 
 class DummyAgentState(TypedDict, total=False):
@@ -230,7 +232,10 @@ def build_dummy_langgraph_agent(
         tools: Optional tool list; defaults to just `dummy_sensitive_tool`.
     """
 
-    _tools = tools or [dummy_sensitive_tool]
+    _tools = [
+        wrap_tool_with_quality_retry(wrap_tool_with_retry(t))
+        for t in (tools or [dummy_sensitive_tool])
+    ]
     tool_node = ToolNode(_tools)
 
     builder = StateGraph(DummyAgentState)

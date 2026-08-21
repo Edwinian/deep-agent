@@ -63,6 +63,7 @@ The dummy agent mirrors that ordering inside `_planner_node`:
 
 So: **repair happens before interrupt/HITL**, matching the nuance in `utils/task_tool_args_repair.py`.
 
+Tools passed to `ToolNode` are wrapped with `utils.retry.wrap_tool_with_retry`, the same helper used for MCP/hotel tools in the deepagents path (`tools/tool_registry.py`). Transient network failures get exponential backoff; permanent errors still fail fast.
 ## 5) Interrupt payloads (what `run.interrupts()` / `run.values` look like)
 
 `StreamService` and `InvokeService` treat interrupts as either:

@@ -32,13 +32,16 @@ from typing_extensions import Annotated, Literal
 
 from deepagents.backends.utils import create_file_data
 from schemas.source import Source
+from utils.retry import is_transient_exception, retry_with_backoff
 from utils.summarize import Summary, summarize
 from utils.tool_messages import text_tool_message
+from utils.tool_quality_retry import run_with_quality_retry
 
 logger = logging.getLogger(__name__)
 
 WEB_SEARCH_TOOL_ID = 2006
 SOURCES_FILE = "/_sources.json"
+MAX_QUALITY_REWRITES = 1
 
 _ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 load_dotenv(_ENV_PATH, override=True)
@@ -324,6 +327,7 @@ def run_tavily_search(
     time_range: Literal["day", "week", "month", "year"] = "week",
     include_answer: bool = True,
     include_favicon: bool = True,
+    on_retry: Callable[[BaseException, int, float], None] | None = None,
 ) -> dict:
     """Perform search using Tavily API for a single query.
 
@@ -336,6 +340,7 @@ def run_tavily_search(
         time_range: Recency filter (day/week/month/year). Defaults to year.
         include_answer: Ask Tavily for a grounded answer summary
         include_favicon: Include favicon URLs for each source
+        on_retry: Optional callback ``(exc, attempt, delay_seconds)`` before each retry
 
     Returns:
         Search results dictionary
@@ -360,8 +365,16 @@ def run_tavily_search(
         # News topic supports days; keep results recent for live events.
         kwargs["days"] = 7
 
-    try:
+    def _search() -> dict:
         return client.search(search_query, **kwargs)
+
+    try:
+        return retry_with_backoff(
+            _search,
+            retry_on=lambda exc: is_transient_exception(exc)
+            and not isinstance(exc, _TAVILY_API_ERRORS),
+            on_retry=on_retry,
+        )
     except _TAVILY_API_ERRORS:
         logger.exception("Tavily search failed for query=%r", search_query)
         raise
@@ -645,24 +658,56 @@ def web_search_tool(
         )
 
     # Bias the engine toward today's facts without replacing the user query.
-    dated_query = f"{search_query} (as of {get_today_str()})"
     tavily_options = _tavily_search_options(resolved_topic, is_simple=is_simple)
 
     def _status(message: str) -> None:
         runtime.emit_output_delta(message)
 
-    try:
-        _status(f'Searching the web for "{search_query}"…')
-        search_results = run_tavily_search(
+    def _on_search_retry(exc: BaseException, attempt: int, delay: float) -> None:
+        _status(
+            f"Search failed (attempt {attempt}), retrying in {delay:.1f}s…"
+        )
+
+    # Last successful search payload retained for file offloading after quality pass.
+    search_bundle: dict[str, Any] = {"results": None, "processed": None, "query": search_query}
+
+    def _execute_search(candidate_query: str) -> str:
+        normalized = normalize_search_query(candidate_query)
+        dated_query = f"{normalized} (as of {get_today_str()})"
+        _status(f'Searching the web for "{normalized}"…')
+        raw = run_tavily_search(
             dated_query,
             max_results=max_results,
             topic=resolved_topic,
             time_range=time_range,
             include_favicon=True,
+            on_retry=_on_search_retry,
             **tavily_options,
         )
-        processed_results = process_search_results(
-            search_results,
+        processed = process_search_results(raw, on_status=_status)
+        search_bundle["results"] = raw
+        search_bundle["processed"] = processed
+        search_bundle["query"] = normalized
+        if not processed:
+            return ""
+        previews: list[str] = []
+        for item in processed:
+            preview = str(item.get("summary") or item.get("title") or "")
+            if len(preview) > 300:
+                preview = preview[:300] + "..."
+            previews.append(f"- {item.get('title')}: {preview}")
+        answer = (raw.get("answer") or "").strip()
+        parts = [f"Query: {normalized}", *previews]
+        if answer:
+            parts.insert(1, f"Answer: {answer}")
+        return "\n".join(parts)
+
+    try:
+        quality = run_with_quality_retry(
+            search_query,
+            _execute_search,
+            tool_name="web_search_tool",
+            max_retries=MAX_QUALITY_REWRITES,
             on_status=_status,
         )
     except Exception as exc:
@@ -680,12 +725,17 @@ def web_search_tool(
             }
         )
 
-    if not processed_results:
+    processed_results = search_bundle.get("processed") or []
+    search_results = search_bundle.get("results") or {}
+    search_query = str(search_bundle.get("query") or search_query)
+
+    if not quality.ok or not processed_results:
         return Command(
             update={
                 "messages": [
                     text_tool_message(
-                        f"No search results returned for '{search_query}'. Try a different query.",
+                        quality.error
+                        or f"No search results returned for '{search_query}'. Try a different query.",
                         tool_call_id,
                         status="error",
                     )

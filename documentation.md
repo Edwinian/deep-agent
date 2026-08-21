@@ -307,28 +307,27 @@ python load_web_documents.py
 
 ### Agentic RAG inside `retrieve_tool`
 
-The RAG sub-agent exposes a single tool, `retrieve_tool` (`tools/rag/retrieve_tool.py`), which runs an **internal** grade-and-rewrite loop before returning context:
+The RAG sub-agent exposes a single tool, `retrieve_tool` (`tools/rag/retrieve_tool.py`), which uses the shared **quality retry** loop (`utils/tool_quality_retry.py`) before generating an answer:
 
 ```mermaid
 flowchart TD
     Q[User query] --> R[Chroma similarity search]
-    R --> G[grade_documents LLM]
-    G -->|relevant| GA[generate_answer LLM]
-    G -->|not relevant| RW[rewrite_query LLM]
+    R --> E[evaluate_tool_output LLM score]
+    E -->|score ok| GA[generate_answer LLM]
+    E -->|score low| RW[rewrite_tool_query LLM]
     RW --> R2[Re-retrieve once]
-    R2 --> G2[grade_documents]
-    G2 --> GA
+    R2 --> E2[evaluate_tool_output]
+    E2 --> GA
     GA --> TM[Tool message with grounded answer]
 ```
 
 | Step | Module | Model / store |
 |------|--------|---------------|
-| Retrieve | `ChromaService.get_retriever()` | ChromaDB + sentence-transformers |
-| Grade | `tools/rag/grade_documents.py` | Structured output → `GENERATE_ANSWER` or `REWRITE_QUERY` |
-| Rewrite | `tools/rag/rewrite_query.py` | Query reformulation (max 1 retry) |
+| Retrieve | `ChromaService.get_retriever()` | ChromaDB + sentence-transformers (+ infra backoff) |
+| Evaluate / rewrite | `utils/tool_quality_retry.py` | Score 0–1 vs query; rewrite if below threshold |
 | Generate | `tools/rag/generate_answer.py` | Grounded answer from retrieved chunks |
 
-Prompts for grade / rewrite / generate are stored in SQLite (`SystemPrompt` table) and loaded at runtime — editable via the **System Prompts** admin UI.
+`generate_answer` (and legacy `grade_documents` / `rewrite_query` prompts) remain in SQLite for the System Prompts admin UI. Retrieval quality control now goes through the shared helper so the same evaluate→rewrite→retry pattern can be reused by other tools.
 
 ### RAG agent prompt
 
@@ -512,6 +511,35 @@ This attaches:
 
 Weather, math, and hotel tools are loaded via `langchain-mcp-adapters` / FastMCP servers (`mcp_servers/`). Optional Bearer token forwarded from `Authorization` header through `mcp_access_token_context`.
 
+### Tool-level retry with backoff
+
+Transient tool failures (timeouts, connection errors, HTTP 429/5xx) are retried with exponential backoff via `utils/retry.py`:
+
+- **Web search** — `run_tavily_search` retries transient network errors; permanent Tavily auth/quota errors fail immediately.
+- **RAG retrieve** — Chroma `retriever.invoke` is retried; empty/irrelevant docs use semantic quality retry (below).
+- **MCP / hotel toolsets** — `resolve_tools` wraps weather, math, and hotel tools with `wrap_tool_with_retry` so both `create_deep_agent` and plain LangGraph `ToolNode` share the same behavior.
+- **Plain LangGraph dummy** — `graphs/dummy_langgraph_agent.py` wraps its tools the same way.
+
+Defaults (overridable): `TOOL_RETRY_MAX_ATTEMPTS=3`, `TOOL_RETRY_INITIAL_INTERVAL=0.5`, `TOOL_RETRY_BACKOFF_FACTOR=2.0`, `TOOL_RETRY_MAX_INTERVAL=8.0`.
+
+### Tool output quality retry (evaluate → rewrite → retry)
+
+Semantic quality failures (off-topic / empty / low usefulness) use `utils/tool_quality_retry.py`:
+
+1. Run the tool with the current query
+2. LLM-score the text output vs the user query (`evaluate_tool_output`)
+3. If score &lt; `TOOL_QUALITY_MIN_SCORE` (default `0.6`), rewrite the query (`rewrite_tool_query`) and retry
+4. Stop after `TOOL_QUALITY_MAX_RETRIES` rewrites (default `1` → 2 total attempts)
+
+Wired into:
+
+- **`retrieve_tool`** — replaces the old binary grade/rewrite loop with the shared scorer
+- **`web_search_tool`** — evaluates search summaries before offloading files
+- **MCP / hotel tools** — `wrap_tool_with_quality_retry` (no-ops when args have no query-like field such as `query` / `city` / `location`)
+- **Plain LangGraph dummy** — same wrapper stack as deepagents MCP tools
+
+This is separate from infrastructure backoff: backoff handles transport flakes; quality retry handles bad results.
+
 ### Speech-to-text
 
 `POST /chats/speech-to-text` — AssemblyAI transcription for voice input in the chat UI.
@@ -567,6 +595,16 @@ CHROMA_COLLECTION_NAME=...
 DAYTONA_SANDBOX_ENABLED=false
 DAYTONA_API_KEY=...
 
+# Tool-level retry / backoff (optional)
+TOOL_RETRY_MAX_ATTEMPTS=3
+TOOL_RETRY_INITIAL_INTERVAL=0.5
+TOOL_RETRY_BACKOFF_FACTOR=2.0
+TOOL_RETRY_MAX_INTERVAL=8.0
+
+# Tool output quality retry (optional)
+TOOL_QUALITY_MAX_RETRIES=1
+TOOL_QUALITY_MIN_SCORE=0.6
+
 # Speech
 ASSEMBLYAI_API_KEY=...
 ```
@@ -591,7 +629,7 @@ cd frontend && npm install && npm run dev
 **Suggested demo flows for interviews:**
 
 1. **Research + HITL** — Ask a live factual question → approve `web_search_tool` → show sources pill and Langfuse session.
-2. **RAG** — Ask about Lilian Weng blog topics (after indexing) → `rag_agent` → `retrieve_tool` grade/rewrite path.
+2. **RAG** — Ask about Lilian Weng blog topics (after indexing) → `rag_agent` → `retrieve_tool` quality-retry path.
 3. **History** — Refresh page with `?threadId=...` → history restored from SQLite checkpoints.
 4. **Tracing** — Open LangSmith/Langfuse while running a multi-step delegation trace.
 
@@ -671,8 +709,9 @@ Point-form walkthrough of each feature — use these steps when explaining the s
 
 - Index docs with `ChromaService`: HuggingFace embeddings, chunk/split, persist to `./chroma_db` (web URLs, PDF, DOCX, etc.).
 - General agent routes vector-DB questions to `rag_agent` via `task`.
-- `retrieve_tool` runs agentic RAG: retrieve → grade relevance → rewrite query + re-retrieve once if needed → generate grounded answer.
-- Grade / rewrite / generate prompts live in SQLite and are editable via the System Prompts admin UI.
+- `retrieve_tool` runs agentic RAG: retrieve → evaluate output quality → rewrite query + re-retrieve once if needed → generate grounded answer.
+- Shared `utils/tool_quality_retry.py` powers quality retry for retrieve, web search, and query-like MCP tools.
+- Generate (and legacy grade/rewrite) prompts live in SQLite and are editable via the System Prompts admin UI.
 - RAG helpers use a smaller model; orchestration agents use a stronger model for reliable tool args.
 
 ### Checkpointing and conversation history
@@ -704,6 +743,8 @@ Point-form walkthrough of each feature — use these steps when explaining the s
 - Skills CRUD + sync skill markdown into the agent backend before each run.
 - PII middleware redacts email/CC/IP/MAC on input, output, and tool results; blocks treating redaction tokens as real data.
 - MCP adapters load weather/math/hotel tools; optional Bearer token forwarded into MCP context.
+- Tool-level exponential backoff (`utils/retry.py`) on transient Tavily/Chroma/MCP failures; permanent errors fail fast.
+- Tool output quality retry (`utils/tool_quality_retry.py`): evaluate score → rewrite query → retry up to a max count.
 - Speech-to-text via AssemblyAI for voice input; admin UI for agents, prompts, and skills.
 
 ### API surface
