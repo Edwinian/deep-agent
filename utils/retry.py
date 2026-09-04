@@ -98,6 +98,10 @@ def is_transient_exception(exc: BaseException) -> bool:
     if isinstance(exc, (TimeoutError, ConnectionError, BrokenPipeError, OSError)):
         return True
 
+    # Qdrant client wraps transport failures in ResponseHandlingException.
+    if type(exc).__name__ == "ResponseHandlingException":
+        return True
+
     # Unknown errors: do not retry by default (avoid amplifying bugs).
     return False
 

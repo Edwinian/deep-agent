@@ -1,4 +1,4 @@
-"""Index Lilian Weng blog posts into ChromaDB for RAG retrieval."""
+"""Index Lilian Weng blog posts into Qdrant Cloud for RAG retrieval."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import sys
 from dotenv import load_dotenv
 from fastapi import HTTPException
 
-from chroma_service import ChromaService
+from qdrant_service import QdrantService
 
 URLS = [
     "https://lilianweng.github.io/posts/2024-11-28-reward-hacking/",
@@ -17,11 +17,12 @@ URLS = [
 
 
 def load_web_documents(urls: list[str] | None = None) -> dict[str, str]:
-    """Fetch URLs and index their content in ChromaDB."""
+    """Fetch URLs and index their content in Qdrant Cloud."""
     load_dotenv(override=True)
-    service = ChromaService()
-    service.delete_web_documents()
-    return service.index_web_documents(urls or URLS)
+    service = QdrantService()
+    target_urls = urls or URLS
+    service.delete_web_documents(target_urls)
+    return service.index_web_documents(target_urls)
 
 
 def main() -> int:
@@ -39,7 +40,7 @@ def main() -> int:
         return 1
 
     print("Indexed web documents successfully.")
-    print(f"Indexed {len(URLS)} URLs into ChromaDB.")
+    print(f"Indexed {len(URLS)} URLs into Qdrant Cloud.")
     return 0
 
 

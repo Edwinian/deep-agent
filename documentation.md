@@ -1,6 +1,6 @@
 # Deep Agents — Technical Documentation
 
-Production LangGraph **deep-agent** framework: multi-agent orchestration, human-in-the-loop (HITL) tool approval, agentic RAG over ChromaDB, web research sub-agents, durable conversation history via LangGraph checkpointers, and dual observability with **Langfuse** and **LangSmith**.
+Production LangGraph **deep-agent** framework: multi-agent orchestration, human-in-the-loop (HITL) tool approval, agentic RAG over Qdrant Cloud, web research sub-agents, durable conversation history via LangGraph checkpointers, and dual observability with **Langfuse** and **LangSmith**.
 
 This document is written for engineers and interviewers who want to understand what was built and how each feature works end-to-end.
 
@@ -34,7 +34,7 @@ This document is written for engineers and interviewers who want to understand w
 | Frontend | Next.js (`frontend/`) | Streaming chat UI, HITL approval panel, thread history, voice input |
 | Agent config DB | SQLite (`db/agent_store.py`) | Agents, system prompts, tools, skills persisted and seeded at startup |
 | Checkpoint store | Async SQLite (`data/checkpoints.db`) | Thread-scoped graph state for multi-turn + HITL resume |
-| Vector store | ChromaDB (`chroma_db/`) | Document chunks for RAG |
+| Vector store | Qdrant Cloud (`qdrant_service.py`) | Document chunks for RAG |
 | Web search | Tavily API | Live research with source offloading |
 | Observability | Langfuse + LangSmith | Request spans, LLM/tool traces, session metadata |
 
@@ -43,7 +43,7 @@ This document is written for engineers and interviewers who want to understand w
 | ID | Name | Purpose |
 |----|------|---------|
 | 1001 | `research_agent` | Web search + reflection; leaf sub-agent |
-| 1003 | `rag_agent` | ChromaDB retrieval; leaf sub-agent |
+| 1003 | `rag_agent` | Qdrant retrieval; leaf sub-agent |
 | 1002 | `general_agent` | Orchestrator: todos, files, delegates to research + RAG, MCP tools |
 
 ---
@@ -73,7 +73,7 @@ flowchart TB
 
     subgraph External
         Tavily[Tavily Search]
-        Chroma[(ChromaDB)]
+        Qdrant[(Qdrant Cloud)]
         LF[Langfuse]
         LS[LangSmith]
     end
@@ -84,7 +84,7 @@ flowchart TB
     IS --> Graph
     Graph --> CP
     RA --> Tavily
-    RAG --> Chroma
+    RAG --> Qdrant
     IS --> LF
     IS --> LS
     SS --> LF
@@ -289,17 +289,25 @@ flowchart TD
 
 ### What it does
 
-The **rag_agent** (ID 1003) answers questions from **indexed documents** in ChromaDB. The general agent delegates via `task(..., subagent_type="rag_agent")` when the user asks about content that may already be in the vector store.
+The **rag_agent** (ID 1003) answers questions from **indexed documents** in Qdrant Cloud. The general agent delegates via `task(..., subagent_type="rag_agent")` when the user asks about content that may already be in the vector store.
 
 ### Indexing
 
 | Component | Role |
 |-----------|------|
-| `chroma_service.py` | HuggingFace embeddings (`all-MiniLM-L6-v2`), chunking (500 chars / 100 overlap), Chroma persistence at `./chroma_db` |
-| `load_web_documents.py` | Indexes Lilian Weng blog URLs into Chroma (demo corpus) |
-| `ChromaService` | Also supports PDF, DOCX, TXT, HTML upload and web URL ingestion |
+| `qdrant_service.py` | **Active** RAG store: HuggingFace embeddings (`all-MiniLM-L6-v2` / `EMBEDDING_MODEL`), upsert/delete by `metadata.source`, LangChain retriever |
+| `qdrant.py` | Qdrant Cloud bootstrap: `create_collection` (384-d Cosine) + `index_payload` for `metadata.source` / `metadata.file_id` |
+| `chroma_service.py` | Legacy local Chroma implementation (kept; not used by retrieve/ingest paths) |
+| `load_web_documents.py` | Indexes Lilian Weng blog URLs into Qdrant (demo corpus) |
+| `RagPipeline` | Extract/chunk web, files, DB poll, CDC; load via `QdrantService.upsert_documents` |
 
-Run indexing:
+**Qdrant Cloud setup** (collection + payload indexes; uses `QDRANT_*` from `.env`):
+
+```bash
+python qdrant.py
+```
+
+Run document indexing:
 
 ```bash
 python load_web_documents.py
@@ -311,7 +319,7 @@ The RAG sub-agent exposes a single tool, `retrieve_tool` (`tools/rag/retrieve_to
 
 ```mermaid
 flowchart TD
-    Q[User query] --> R[Chroma similarity search]
+    Q[User query] --> R[Qdrant similarity search]
     R --> E[evaluate_tool_output LLM score]
     E -->|score ok| GA[generate_answer LLM]
     E -->|score low| RW[rewrite_tool_query LLM]
@@ -323,7 +331,7 @@ flowchart TD
 
 | Step | Module | Model / store |
 |------|--------|---------------|
-| Retrieve | `ChromaService.get_retriever()` | ChromaDB + sentence-transformers (+ infra backoff) |
+| Retrieve | `QdrantService.get_retriever()` | Qdrant Cloud + sentence-transformers (+ infra backoff) |
 | Evaluate / rewrite | `utils/tool_quality_retry.py` | Score 0–1 vs query; rewrite if below threshold |
 | Generate | `tools/rag/generate_answer.py` | Grounded answer from retrieved chunks |
 
@@ -516,7 +524,7 @@ Weather, math, and hotel tools are loaded via `langchain-mcp-adapters` / FastMCP
 Transient tool failures (timeouts, connection errors, HTTP 429/5xx) are retried with exponential backoff via `utils/retry.py`:
 
 - **Web search** — `run_tavily_search` retries transient network errors; permanent Tavily auth/quota errors fail immediately.
-- **RAG retrieve** — Chroma `retriever.invoke` is retried; empty/irrelevant docs use semantic quality retry (below).
+- **RAG retrieve** — Qdrant `retriever.invoke` is retried; empty/irrelevant docs use semantic quality retry (below).
 - **MCP / hotel toolsets** — `resolve_tools` wraps weather, math, and hotel tools with `wrap_tool_with_retry` so both `create_deep_agent` and plain LangGraph `ToolNode` share the same behavior.
 - **Plain LangGraph dummy** — `graphs/dummy_langgraph_agent.py` wraps its tools the same way.
 
@@ -590,6 +598,10 @@ LANGFUSE_HOST=https://cloud.langfuse.com   # if self-hosted, set accordingly
 
 # RAG
 CHROMA_COLLECTION_NAME=...
+EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+QDRANT_URL=https://....aws.cloud.qdrant.io
+QDRANT_API_KEY=...
+QDRANT_COLLECTION_NAME=deep_agents_rag
 
 # Daytona sandbox (optional)
 DAYTONA_SANDBOX_ENABLED=false
@@ -641,7 +653,7 @@ cd frontend && npm install && npm run dev
 |---------|---------------|
 | HITL | `utils/hitl.py`, `tools/default_interrupt_on.py`, `frontend/src/components/ChatClient.tsx` |
 | Research | `agents/` (seed), `tools/web_search/`, `prompts/researcher_instructions.py` |
-| RAG | `chroma_service.py`, `tools/rag/`, `load_web_documents.py` |
+| RAG | `qdrant_service.py`, `qdrant.py`, `chroma_service.py` (legacy), `tools/rag/`, `load_web_documents.py` |
 | Checkpointer | `utils/get_checkpointer.py`, `main.py` (lifespan), `modules/chats/invoke_service.py` |
 | Tracing | `utils/tracing.py`, `utils/langfuse_tracing.py` |
 | Streaming | `modules/chats/stream_service.py`, `schemas/invoke_response.py` |
@@ -656,7 +668,7 @@ Point-form walkthrough of each feature — use these steps when explaining the s
 ### System overview
 
 - Built a production multi-agent stack: LangGraph orchestration, FastAPI API, Next.js chat UI.
-- Persisted agent config in SQLite; conversation state in LangGraph checkpointers; RAG corpus in ChromaDB.
+- Persisted agent config in SQLite; conversation state in LangGraph checkpointers; RAG corpus in Qdrant Cloud.
 - Wired dual observability (Langfuse + LangSmith) and Tavily for live web research.
 - Seeded three agents: `general_agent` (orchestrator), `research_agent` (web), `rag_agent` (vector DB).
 
@@ -665,7 +677,7 @@ Point-form walkthrough of each feature — use these steps when explaining the s
 - Frontend posts to FastAPI; chats resolve to a compiled LangGraph via `InvokeService` / `StreamService`.
 - Compilation: load agent from SQLite → recursively compile sub-agents → `create_deep_agent()` with tools, HITL, PII middleware, checkpointer → cache by `agent_id`.
 - Shared graph state: `messages`, `todos`, and virtual `files` (context offloading via `file_reducer`).
-- Orchestrator delegates to leaf agents through the `task` tool; leaves call Tavily or Chroma and return results.
+- Orchestrator delegates to leaf agents through the `task` tool; leaves call Tavily or Qdrant and return results.
 
 ### Agent model
 
@@ -707,7 +719,7 @@ Point-form walkthrough of each feature — use these steps when explaining the s
 
 ### RAG (retrieval-augmented generation)
 
-- Index docs with `ChromaService`: HuggingFace embeddings, chunk/split, persist to `./chroma_db` (web URLs, PDF, DOCX, etc.).
+- Index docs with `QdrantService`: HuggingFace embeddings, chunk/split, upsert to Qdrant Cloud (web URLs, PDF, DOCX, etc.). `chroma_service.py` remains as a legacy local option.
 - General agent routes vector-DB questions to `rag_agent` via `task`.
 - `retrieve_tool` runs agentic RAG: retrieve → evaluate output quality → rewrite query + re-retrieve once if needed → generate grounded answer.
 - Shared `utils/tool_quality_retry.py` powers quality retry for retrieve, web search, and query-like MCP tools.
@@ -743,7 +755,7 @@ Point-form walkthrough of each feature — use these steps when explaining the s
 - Skills CRUD + sync skill markdown into the agent backend before each run.
 - PII middleware redacts email/CC/IP/MAC on input, output, and tool results; blocks treating redaction tokens as real data.
 - MCP adapters load weather/math/hotel tools; optional Bearer token forwarded into MCP context.
-- Tool-level exponential backoff (`utils/retry.py`) on transient Tavily/Chroma/MCP failures; permanent errors fail fast.
+- Tool-level exponential backoff (`utils/retry.py`) on transient Tavily/Qdrant/MCP failures; permanent errors fail fast.
 - Tool output quality retry (`utils/tool_quality_retry.py`): evaluate score → rewrite query → retry up to a max count.
 - Speech-to-text via AssemblyAI for voice input; admin UI for agents, prompts, and skills.
 
@@ -754,5 +766,5 @@ Point-form walkthrough of each feature — use these steps when explaining the s
 
 ### Environment variables / quick start
 
-- Required keys: Tavily, Anthropic and/or xAI; optional LangSmith, Langfuse, Chroma collection, Daytona, AssemblyAI.
+- Required keys: Tavily, Anthropic and/or xAI; optional LangSmith, Langfuse, Qdrant (`QDRANT_*`), Daytona, AssemblyAI.
 - Local demo path: venv + requirements → seed RAG corpus → run `main.py` → Next.js frontend → interview flows (HITL research, RAG, history restore, tracing).

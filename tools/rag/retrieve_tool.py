@@ -1,4 +1,4 @@
-"""Retrieve indexed documents from ChromaDB."""
+"""Retrieve indexed documents from Qdrant Cloud."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.types import Command
 from typing_extensions import Annotated
 
-from chroma_service import ChromaService
+from qdrant_service import QdrantService
 from tools.rag.generate_answer import generate_answer
 from utils.retry import retry_with_backoff
 from utils.tool_messages import text_tool_message
@@ -22,12 +22,12 @@ MAX_QUERY_REWRITES = 1
 
 @lru_cache(maxsize=1)
 def _get_retriever() -> BaseRetriever:
-    service = ChromaService()
+    service = QdrantService()
     return service.get_retriever()
 
 
 def _retrieve_context(query: str) -> str:
-    """Fetch and join Chroma chunks for ``query`` (infra retries only)."""
+    """Fetch and join Qdrant chunks for ``query`` (infra retries only)."""
     retriever = _get_retriever()
     retrieved_docs = retry_with_backoff(lambda: retriever.invoke(query))
     if not retrieved_docs:
@@ -43,7 +43,7 @@ def retrieve_tool(
 ) -> Command:
     """Search and return relevant passages from indexed documents.
 
-    Retrieves from ChromaDB, evaluates output quality against the query, rewrites
+    Retrieves from Qdrant, evaluates output quality against the query, rewrites
     and retries when quality is low, then generates a concise grounded answer.
 
     Args:

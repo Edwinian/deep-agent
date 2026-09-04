@@ -1,7 +1,8 @@
 """RAG extraction layer.
 
 Web, file, poll-based SQLite extract, and CDC push extract.
-Transform (chunk/validate) and Chroma load live in ``chroma_service.ChromaService``.
+Transform (chunk/validate) and vector load live in ``qdrant_service.QdrantService``
+(``chroma_service.ChromaService`` remains available for local/dev).
 """
 
 from __future__ import annotations
@@ -114,7 +115,7 @@ class RagPipeline:
 
     @staticmethod
     def _source_key(source_table: str, source_pk: Any) -> str:
-        """Stable Chroma ``source`` value for a source-table row."""
+        """Stable vector-store ``source`` value for a source-table row."""
         return f"{source_table}:{source_pk}"
 
     @staticmethod
@@ -710,11 +711,11 @@ class RagPipeline:
         if not loader_class:
             raise ValueError(f"File loader not found: {file_path}")
 
-            if file_extension == ".txt":
+        if file_extension == ".txt":
             return loader_class(file_path)
 
-                loader = loader_class(file_path, mode="elements")
-                documents = loader.load()
+        loader = loader_class(file_path, mode="elements")
+        documents = loader.load()
         for document in documents:
             document.metadata["type"] = file_extension
         return documents
@@ -732,32 +733,32 @@ class RagPipeline:
             return []
 
         processed_docs: list[Document] = []
-            current_content = ""
+        current_content = ""
 
-            for doc in documents:
-                content = doc.page_content.strip()
+        for doc in documents:
+            content = doc.page_content.strip()
             if len(content) < min_fragment_len:
-                    current_content += " " + content
+                current_content += " " + content
                 continue
-
-                    if current_content:
-                        processed_docs.append(
-                            Document(
-                                page_content=current_content.strip(),
-                                metadata=doc.metadata,
-                            )
-                        )
-                        current_content = ""
-
-                    processed_docs.append(doc)
 
             if current_content:
                 processed_docs.append(
                     Document(
                         page_content=current_content.strip(),
-                        metadata=documents[-1].metadata,
+                        metadata=doc.metadata,
                     )
                 )
+                current_content = ""
+
+            processed_docs.append(doc)
+
+        if current_content:
+            processed_docs.append(
+                Document(
+                    page_content=current_content.strip(),
+                    metadata=documents[-1].metadata,
+                )
+            )
 
         return processed_docs
 
