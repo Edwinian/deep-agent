@@ -160,7 +160,7 @@ def compile_agent(
         subagents=compiled_subagents,
         model=resolved_model,
         middleware=DEFAULT_PII_MIDDLEWARE,
-        # Pass a BackendProtocol instance (not a factory) per deepagents 0.7 guidance.
+        # Pass backend instance or StateBackend factory for deepagents 0.3.x.
         backend=filesystem_backend(),
         checkpointer=checkpointer or get_checkpointer(CheckpointerType.ASYNC_SQLITE),
         interrupt_on=resolved_interrupt_on,

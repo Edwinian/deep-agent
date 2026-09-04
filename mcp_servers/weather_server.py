@@ -1,15 +1,17 @@
 import os
 from urllib.parse import urlparse
 
-from fastmcp import FastMCP
-from fastmcp.server.dependencies import get_http_headers
+from mcp.server.fastmcp import Context, FastMCP
 
 mcp = FastMCP("WeatherTool")
 
 
-def _access_token_from_headers(headers: dict[str, str]) -> str | None:
-    """Extract a bearer token from incoming MCP HTTP headers."""
-    auth = headers.get("authorization") or headers.get("Authorization")
+def _access_token_from_context(ctx: Context) -> str | None:
+    """Extract a bearer token from the incoming MCP HTTP request."""
+    request = ctx.request_context.request
+    if request is None:
+        return None
+    auth = request.headers.get("authorization") or request.headers.get("Authorization")
     if not auth:
         return None
     prefix = "bearer "
@@ -19,10 +21,9 @@ def _access_token_from_headers(headers: dict[str, str]) -> str | None:
 
 
 @mcp.tool()
-def get_weather(city: str) -> str:
+def get_weather(city: str, ctx: Context) -> str:
     """Get current weather for a city."""
-    headers = get_http_headers()
-    token = _access_token_from_headers(headers)
+    token = _access_token_from_context(ctx)
     if token:
         return f"Sunny in {city} (authorized as {token[:8]}...)"
     return f"Sunny in {city}"
@@ -33,4 +34,7 @@ if __name__ == "__main__":
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     path = parsed.path or "/mcp"
-    mcp.run(transport="http", host=host, port=port, path=path)
+    mcp.settings.host = host
+    mcp.settings.port = port
+    mcp.settings.streamable_http_path = path
+    mcp.run(transport="streamable-http")

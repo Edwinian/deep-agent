@@ -21,10 +21,11 @@ langfuse
 langsmith
 langchain-daytona
 daytona>=0.102.0
-fastmcp
-langchain-mcp-adapters
+langchain-mcp-adapters>=0.3.2
+mcp>=1.24.0,<2.0.0
 toolbox-langchain
 websockets<12
+
 
 # chroma_service
 numpy>=1.26.0

@@ -30,11 +30,7 @@ from deepagents.backends.protocol import (
     FileDownloadResponse,
     FileInfo,
     FileUploadResponse,
-    GlobResult,
     GrepMatch,
-    GrepResult,
-    LsResult,
-    ReadResult,
     SandboxBackendProtocol,
     WriteResult,
 )
@@ -51,7 +47,6 @@ DEFAULT_WORKSPACE_THREADS_SUBDIR = "threads"
 
 _daytona_client_instance: Daytona | None = None
 _daytona_workspace_cache: dict[str, str] = {}
-_state_backend = StateBackend()
 _thread_scoped_sandbox_backend: "ThreadScopedSandboxBackend | None" = None
 
 
@@ -64,19 +59,21 @@ def daytona_sandbox_enabled() -> bool:
     )
 
 
-def filesystem_backend() -> BackendProtocol:
-    """Return a ``BackendProtocol`` instance for ``create_deep_agent``.
+def filesystem_backend():
+    """Return a backend instance or factory for ``create_deep_agent``.
 
-    deepagents 0.7+ deprecates passing a callable backend factory. We pass a
-    concrete instance instead: ``StateBackend`` locally, or ``ThreadScopedSandboxBackend``
-    when Daytona is enabled (resolves the thread sandbox on each file operation).
+    deepagents 0.3.x expects either a ``BackendProtocol`` or a
+    ``BackendFactory`` (``Callable[[ToolRuntime], BackendProtocol]``).
+    ``StateBackend`` requires a ``ToolRuntime``, so the non-Daytona path
+    returns a factory. Daytona uses a thread-scoped instance that resolves
+    the sandbox on each file operation.
     """
     if daytona_sandbox_enabled():
         global _thread_scoped_sandbox_backend
         if _thread_scoped_sandbox_backend is None:
             _thread_scoped_sandbox_backend = ThreadScopedSandboxBackend()
         return _thread_scoped_sandbox_backend
-    return _state_backend
+    return lambda runtime: StateBackend(runtime)
 
 
 def _get_daytona_client() -> Daytona:
@@ -181,19 +178,14 @@ def _resolve_daytona_sandbox(thread_id: str) -> Sandbox:
 def _resolve_thread_backend() -> BackendProtocol:
     """Resolve the filesystem backend for the current LangGraph thread."""
     if not daytona_sandbox_enabled():
-        return _state_backend
+        raise RuntimeError(
+            "Daytona is disabled; ThreadScopedSandboxBackend should not be used. "
+            "Pass filesystem_backend()'s StateBackend factory instead."
+        )
 
     thread_id = _thread_id_from_config()
-    try:
-        sandbox = _resolve_daytona_sandbox(thread_id)
-        return build_daytona_backend(sandbox, thread_id)
-    except Exception as exc:
-        logger.warning(
-            "Daytona sandbox unavailable for thread %s; using StateBackend: %s",
-            thread_id,
-            exc,
-        )
-        return _state_backend
+    sandbox = _resolve_daytona_sandbox(thread_id)
+    return build_daytona_backend(sandbox, thread_id)
 
 
 class ThreadScopedSandboxBackend(SandboxBackendProtocol):
@@ -215,13 +207,13 @@ class ThreadScopedSandboxBackend(SandboxBackendProtocol):
             raise NotImplementedError(msg)
         return inner.id
 
-    def ls(self, path: str) -> LsResult:
-        return self._inner().ls(path)
+    def ls_info(self, path: str) -> list[FileInfo]:
+        return self._inner().ls_info(path)
 
-    async def als(self, path: str) -> LsResult:
-        return await asyncio.to_thread(self.ls, path)
+    async def als_info(self, path: str) -> list[FileInfo]:
+        return await asyncio.to_thread(self.ls_info, path)
 
-    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
         return self._inner().read(file_path, offset=offset, limit=limit)
 
     async def aread(
@@ -229,7 +221,7 @@ class ThreadScopedSandboxBackend(SandboxBackendProtocol):
         file_path: str,
         offset: int = 0,
         limit: int = 2000,
-    ) -> ReadResult:
+    ) -> str:
         return await asyncio.to_thread(self.read, file_path, offset, limit)
 
     def write(self, file_path: str, content: str) -> WriteResult:
@@ -260,27 +252,27 @@ class ThreadScopedSandboxBackend(SandboxBackendProtocol):
             self.edit, file_path, old_string, new_string, replace_all
         )
 
-    def grep(
+    def grep_raw(
         self,
         pattern: str,
         path: str | None = None,
         glob: str | None = None,
-    ) -> GrepResult:
-        return self._inner().grep(pattern, path, glob)
+    ) -> list[GrepMatch] | str:
+        return self._inner().grep_raw(pattern, path, glob)
 
-    async def agrep(
+    async def agrep_raw(
         self,
         pattern: str,
         path: str | None = None,
         glob: str | None = None,
-    ) -> GrepResult:
-        return await asyncio.to_thread(self.grep, pattern, path, glob)
+    ) -> list[GrepMatch] | str:
+        return await asyncio.to_thread(self.grep_raw, pattern, path, glob)
 
-    def glob(self, pattern: str, path: str = "/") -> GlobResult:
-        return self._inner().glob(pattern, path)
+    def glob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
+        return self._inner().glob_info(pattern, path)
 
-    async def aglob(self, pattern: str, path: str = "/") -> GlobResult:
-        return await asyncio.to_thread(self.glob, pattern, path)
+    async def aglob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
+        return await asyncio.to_thread(self.glob_info, pattern, path)
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
         return self._inner().download_files(paths)
@@ -302,6 +294,7 @@ class ThreadScopedSandboxBackend(SandboxBackendProtocol):
         *,
         timeout: int | None = None,
     ) -> ExecuteResponse:
+        del timeout  # deepagents 0.3 / langchain-daytona execute(command) only
         inner = self._inner()
         if not isinstance(inner, SandboxBackendProtocol):
             msg = (
@@ -309,8 +302,6 @@ class ThreadScopedSandboxBackend(SandboxBackendProtocol):
                 "use DAYTONA_SANDBOX_ENABLED=true with a valid DAYTONA_API_KEY."
             )
             raise NotImplementedError(msg)
-        if timeout is not None:
-            return inner.execute(command, timeout=timeout)
         return inner.execute(command)
 
     async def aexecute(
@@ -348,7 +339,7 @@ def thread_physical_root(sandbox: Sandbox, thread_id: str) -> str:
 def ensure_thread_workspace(backend: DaytonaSandbox, physical_root: str) -> None:
     """Create the per-thread workspace directory inside the sandbox (idempotent)."""
     quoted = shlex.quote(physical_root)
-    result = backend.execute(f"mkdir -p {quoted}", timeout=60)
+    result = backend.execute(f"mkdir -p {quoted}")
     if result.exit_code != 0:
         msg = (result.output or "").strip() or f"exit code {result.exit_code}"
         raise RuntimeError(f"Failed to create Daytona workspace {physical_root}: {msg}")
@@ -400,19 +391,14 @@ class PrefixedSandboxBackend(SandboxBackendProtocol):
             {**match, "path": self._to_virtual(match["path"])},
         )
 
-    def ls(self, path: str) -> LsResult:
-        result = self._inner.ls(self._to_physical(path))
-        if result.entries is None:
-            return result
-        return LsResult(
-            error=result.error,
-            entries=[self._remap_file_info(entry) for entry in result.entries],
-        )
+    def ls_info(self, path: str) -> list[FileInfo]:
+        entries = self._inner.ls_info(self._to_physical(path))
+        return [self._remap_file_info(entry) for entry in entries]
 
-    async def als(self, path: str) -> LsResult:
-        return await asyncio.to_thread(self.ls, path)
+    async def als_info(self, path: str) -> list[FileInfo]:
+        return await asyncio.to_thread(self.ls_info, path)
 
-    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
         return self._inner.read(self._to_physical(file_path), offset=offset, limit=limit)
 
     async def aread(
@@ -420,7 +406,7 @@ class PrefixedSandboxBackend(SandboxBackendProtocol):
         file_path: str,
         offset: int = 0,
         limit: int = 2000,
-    ) -> ReadResult:
+    ) -> str:
         return await asyncio.to_thread(self.read, file_path, offset, limit)
 
     def write(self, file_path: str, content: str) -> WriteResult:
@@ -465,40 +451,32 @@ class PrefixedSandboxBackend(SandboxBackendProtocol):
             self.edit, file_path, old_string, new_string, replace_all
         )
 
-    def grep(
+    def grep_raw(
         self,
         pattern: str,
         path: str | None = None,
         glob: str | None = None,
-    ) -> GrepResult:
+    ) -> list[GrepMatch] | str:
         physical_path = self._to_physical(path) if path is not None else None
-        result = self._inner.grep(pattern, physical_path, glob)
-        if result.matches is None:
+        result = self._inner.grep_raw(pattern, physical_path, glob)
+        if isinstance(result, str):
             return result
-        return GrepResult(
-            error=result.error,
-            matches=[self._remap_grep_match(match) for match in result.matches],
-        )
+        return [self._remap_grep_match(match) for match in result]
 
-    async def agrep(
+    async def agrep_raw(
         self,
         pattern: str,
         path: str | None = None,
         glob: str | None = None,
-    ) -> GrepResult:
-        return await asyncio.to_thread(self.grep, pattern, path, glob)
+    ) -> list[GrepMatch] | str:
+        return await asyncio.to_thread(self.grep_raw, pattern, path, glob)
 
-    def glob(self, pattern: str, path: str = "/") -> GlobResult:
-        result = self._inner.glob(pattern, self._to_physical(path))
-        if result.matches is None:
-            return result
-        return GlobResult(
-            error=result.error,
-            matches=[self._remap_file_info(match) for match in result.matches],
-        )
+    def glob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
+        matches = self._inner.glob_info(pattern, self._to_physical(path))
+        return [self._remap_file_info(match) for match in matches]
 
-    async def aglob(self, pattern: str, path: str = "/") -> GlobResult:
-        return await asyncio.to_thread(self.glob, pattern, path)
+    async def aglob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
+        return await asyncio.to_thread(self.glob_info, pattern, path)
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
         physical_paths = [self._to_physical(path) for path in paths]
@@ -539,9 +517,10 @@ class PrefixedSandboxBackend(SandboxBackendProtocol):
         *,
         timeout: int | None = None,
     ) -> ExecuteResponse:
+        del timeout  # deepagents 0.3 / langchain-daytona execute(command) only
         # Shell commands from BaseSandbox already embed physical paths because
         # file ops above pass translated paths to the inner backend.
-        return self._inner.execute(command, timeout=timeout)
+        return self._inner.execute(command)
 
     async def aexecute(
         self,
@@ -580,13 +559,17 @@ def _skills_root_paths() -> list[str]:
 
 
 def _backend_for_skills(*, thread_id: str | None) -> BackendProtocol:
-    if daytona_sandbox_enabled():
-        if thread_id is None:
-            msg = "thread_id is required to sync skills to a Daytona sandbox"
-            raise ValueError(msg)
-        sandbox = _resolve_daytona_sandbox(thread_id)
-        return build_daytona_backend(sandbox, thread_id)
-    return _state_backend
+    if not daytona_sandbox_enabled():
+        raise RuntimeError(
+            "Skill file sync requires Daytona when using deepagents 0.3 StateBackend "
+            "(ToolRuntime is unavailable at skill-load time). "
+            "Set DAYTONA_SANDBOX_ENABLED=true or skip skill file materialization."
+        )
+    if thread_id is None:
+        msg = "thread_id is required to sync skills to a Daytona sandbox"
+        raise ValueError(msg)
+    sandbox = _resolve_daytona_sandbox(thread_id)
+    return build_daytona_backend(sandbox, thread_id)
 
 
 def _ensure_parent_dir(backend: BackendProtocol, file_path: str) -> None:
@@ -596,10 +579,10 @@ def _ensure_parent_dir(backend: BackendProtocol, file_path: str) -> None:
     if isinstance(backend, PrefixedSandboxBackend):
         physical_parent = backend._to_physical(parent)
         quoted = shlex.quote(physical_parent)
-        result = backend._inner.execute(f"mkdir -p {quoted}", timeout=60)
+        result = backend._inner.execute(f"mkdir -p {quoted}")
     elif isinstance(backend, SandboxBackendProtocol):
         quoted = shlex.quote(parent)
-        result = backend.execute(f"mkdir -p {quoted}", timeout=60)
+        result = backend.execute(f"mkdir -p {quoted}")
     else:
         return
     if result.exit_code != 0:
@@ -622,7 +605,12 @@ def load_skills(
     if not skill_rows:
         return []
 
-    if daytona_sandbox_enabled() and thread_id is None:
+    # Without Daytona, StateBackend needs ToolRuntime (unavailable at compile time).
+    # Return skill roots only; runtime SkillsMiddleware / thread sync handles content.
+    if not daytona_sandbox_enabled():
+        return _skills_root_paths()
+
+    if thread_id is None:
         return _skills_root_paths()
 
     backend = _backend_for_skills(thread_id=thread_id)

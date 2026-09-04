@@ -517,7 +517,7 @@ This attaches:
 
 ### MCP tools
 
-Weather, math, and hotel tools are loaded via `langchain-mcp-adapters` / FastMCP servers (`mcp_servers/`). Optional Bearer token forwarded from `Authorization` header through `mcp_access_token_context`.
+Weather, math, and hotel tools are loaded via `langchain-mcp-adapters` and MCP servers under `mcp_servers/` (official `mcp.server.fastmcp`, not the separate `fastmcp` PyPI package — that package conflicts with `mcp` 1.x required by the adapters). Optional Bearer token forwarded from `Authorization` header through `mcp_access_token_context`.
 
 ### Tool-level retry with backoff
 

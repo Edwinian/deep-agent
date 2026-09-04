@@ -253,6 +253,7 @@ def wrap_tool_with_retry(
             on_retry=on_retry,
         )
 
-    tool.invoke = invoke  # type: ignore[method-assign]
-    tool.ainvoke = ainvoke  # type: ignore[method-assign]
+    # StructuredTool is a Pydantic model; plain setattr rejects non-field names.
+    object.__setattr__(tool, "invoke", invoke)
+    object.__setattr__(tool, "ainvoke", ainvoke)
     return tool
