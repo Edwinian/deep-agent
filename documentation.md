@@ -271,7 +271,7 @@ flowchart TD
 1. **Search** — Tavily with configurable `topic`, `time_range` (default `year`), `max_results`.
 2. **Content processing** — HTML → markdown, optional summarization (`utils/summarize.py`).
 3. **Context offloading** — Large result bodies stored in agent `files`; tool message returns a short summary.
-4. **Source tracking** — `Source` objects (title, URL, favicon, score) attached to tool messages and aggregated for the UI sources pill.
+4. **Source tracking** — `Source` objects (title, URL, favicon, score) attached to tool messages and aggregated for the UI sources pill for the **current user turn only** (`/_sources.json` is cleared when a new prompt starts).
 5. **HITL** — Execution pauses until user approves (if `interrupt_on[web_search_tool] == True`).
 
 ### Prompt engineering
@@ -404,8 +404,8 @@ sequenceDiagram
 `InvokeService.build_history_messages()` (`modules/chats/invoke_service.py`):
 
 - Walks checkpoint `messages` (human / AI / tool)
-- Rebuilds assistant bubbles with tool events, reasoning, and merged sources
-- Loads web-search sources from virtual `/_sources.json` in `files` when present
+- Rebuilds assistant bubbles with tool events, reasoning, and per-turn sources from tool messages
+- ``/_sources.json`` is reset on each new user prompt so HITL / `run_finished` only expose sources for the latest turn (multiple searches within one turn still merge)
 - Returns `awaiting_tool_permission` + `action_requests` if interrupts are pending
 
 ### Thread lifecycle endpoints

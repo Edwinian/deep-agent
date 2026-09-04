@@ -308,6 +308,8 @@ class InvokeService:
                 detail="message is required unless resuming with permissions.",
             )
         await self._prepare_thread_for_new_user_message(agent, config)
+        # Drop prior-turn web sources so run_finished / HITL only expose this prompt.
+        await self._reset_web_search_sources(agent, config)
         return {"messages": [HumanMessage(content=message)]}
 
     async def run_agent(
@@ -449,6 +451,29 @@ class InvokeService:
                 if not InvokeService.content_to_text(data.get("content")).strip():
                     return True
         return False
+
+    async def _reset_web_search_sources(
+        self,
+        agent: CompiledStateGraph,
+        config: RunnableConfig,
+    ) -> None:
+        """Clear ``/_sources.json`` so a new user prompt starts with empty sources."""
+        from tools.web_search.web_search_tool import SOURCES_FILE, _write_file_to_state
+
+        snapshot = await agent.aget_state(config, subgraphs=True)
+        files = (snapshot.values or {}).get("files")
+        if not isinstance(files, dict) or not files:
+            return
+
+        updated = dict(files)
+        has_sources = SOURCES_FILE in updated or SOURCES_FILE.lstrip("/") in updated
+        if not has_sources:
+            return
+
+        _write_file_to_state(updated, SOURCES_FILE, "[]")
+        # Drop legacy unprefixed key if both forms existed.
+        updated.pop(SOURCES_FILE.lstrip("/"), None)
+        await agent.aupdate_state(config, {"files": updated})
 
     async def _rewind_checkpoint_messages(
         self,
@@ -599,12 +624,15 @@ class InvokeService:
         *,
         state_values: dict[str, Any] | None = None,
     ) -> list[HistoryChatMessage]:
-        """Collapse LangChain checkpoint messages into chat UI bubbles."""
-        from tools.web_search.web_search_tool import _load_sources_file
+        """Collapse LangChain checkpoint messages into chat UI bubbles.
 
+        ``state_values`` is accepted for call-site compatibility; sources are
+        taken from per-tool message kwargs (turn-scoped), not ``/_sources.json``.
+        """
         history: list[HistoryChatMessage] = []
         current_assistant: HistoryChatMessage | None = None
         tools_by_id: dict[str, HistoryToolEvent] = {}
+        _ = state_values
 
         for message in messages:
             if isinstance(message, HumanMessage) or (
@@ -720,17 +748,9 @@ class InvokeService:
                         )
                 continue
 
-        if history and state_values:
-            files = state_values.get("files")
-            file_sources = _load_sources_file(files) if isinstance(files, dict) else []
-            if file_sources:
-                for item in reversed(history):
-                    if item.role == "assistant":
-                        item.sources = cls._merge_history_sources(
-                            item.sources,
-                            file_sources,
-                        )
-                        break
+        # Do not attach the full ``/_sources.json`` blob to the last assistant —
+        # that file can include prior turns. Per-turn sources already come from
+        # tool messages above.
 
         return history
 

@@ -164,7 +164,12 @@ def _load_sources_file(files: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _write_sources_file(files: dict[str, Any], sources: list[Source]) -> None:
-    """Persist merged sources for later run_finished / HITL turns."""
+    """Persist sources for this user turn (HITL resume / run_finished).
+
+    Merges with the existing ``/_sources.json`` so multiple searches in the
+    *same* turn accumulate. The file is reset to ``[]`` when a new user
+    message starts (see ``InvokeService._reset_web_search_sources``).
+    """
     merged = _merge_source_dicts(_load_sources_file(files), sources)
     _write_file_to_state(
         files,

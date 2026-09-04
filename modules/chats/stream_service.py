@@ -739,7 +739,11 @@ class StreamService:
 
     @staticmethod
     def collect_sources_from_state(raw_result: dict[str, Any]) -> list[Source]:
-        """Collect Source payloads from tool messages and ``/_sources.json``."""
+        """Collect sources for the latest user turn only.
+
+        Uses tool messages after the last human message, plus ``/_sources.json``
+        (cleared at the start of each new user prompt so it stays turn-scoped).
+        """
         from tools.web_search.web_search_tool import SOURCES_FILE, _load_sources_file
 
         by_url: dict[str, Source] = {}
@@ -760,13 +764,19 @@ class StreamService:
         files = raw_result.get("files")
         if isinstance(files, dict):
             _add(_load_sources_file(files))
-            # Also accept either key form written by older runs.
             if SOURCES_FILE.lstrip("/") in files and SOURCES_FILE not in files:
                 _add(_load_sources_file({SOURCES_FILE: files[SOURCES_FILE.lstrip("/")]}))
 
         messages = raw_result.get("messages") or []
         if isinstance(messages, list):
-            for message in messages:
+            last_human_idx = -1
+            for index, message in enumerate(messages):
+                if InvokeService._is_human_message(message):
+                    last_human_idx = index
+            turn_messages = (
+                messages[last_human_idx + 1 :] if last_human_idx >= 0 else messages
+            )
+            for message in turn_messages:
                 tool_message = None
                 if isinstance(message, ToolMessage):
                     tool_message = message
