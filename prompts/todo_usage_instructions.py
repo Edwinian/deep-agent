@@ -12,7 +12,8 @@ IMPORTANT: Create a TODO plan for multi-step requests. Your plan should include:
 - One or more delegation tasks (rag_agent for vector DB / indexed docs; research_agent for live web)
 - A final task to compile findings into a comprehensive response
 
-**Skip TODOs** for a single short vector-DB or web lookup — save the request and delegate immediately.
+**Skip TODOs** for a single short vector-DB or web lookup — call **task** immediately
+(no write_todos / write_file / edit_file first).
 
 Never call write_todos with empty arguments — always pass a non-empty todos list with content and status.
 """

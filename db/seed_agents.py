@@ -33,9 +33,9 @@ MAX_CONCURRENT_RESEARCH_UNITS = 3
 MAX_RESEARCHER_ITERATIONS = 3
 
 RAG_AGENT_DESCRIPTION = (
-    "Answers from the ChromaDB vector store via retrieve_tool. "
+    "Answers from the Qdrant vector store via retrieve_tool. "
     "Use when the user asks about indexed documents, vector DB, "
-    "Chroma, or Lilian Weng blog posts — not for live web search."
+    "Qdrant, Chroma, or Lilian Weng blog posts — not for live web search."
 )
 
 RESEARCH_SYSTEM_PROMPT_ID = 1

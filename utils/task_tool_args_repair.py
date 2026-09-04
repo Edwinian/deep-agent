@@ -93,10 +93,15 @@ _RAG_REQUEST_MARKERS = (
     "chromadb",
     "chroma db",
     "chroma",
+    "qdrant",
     "indexed document",
     "indexed doc",
     "look up on vector",
     "retrieval from",
+)
+
+_FILESYSTEM_TOOL_NAMES = frozenset(
+    {"ls", "write_file", "edit_file", "read_file", "write_todos", "read_todos"}
 )
 
 _MISROUTE_REPLY_MARKERS = (
@@ -312,24 +317,70 @@ def _tool_call_args_empty(tool_call: dict[str, Any]) -> bool:
 
 def _has_successful_task_result(messages: list[Any] | None) -> bool:
     """True when a prior ``task`` tool already returned a non-empty answer."""
+    return _latest_human_already_answered_by_task(messages)
+
+
+def _latest_human_already_answered_by_task(messages: list[Any] | None) -> bool:
+    """True when the most recent human turn already has a successful ``task`` result."""
     if not messages:
         return False
-    for message in reversed(messages):
-        if isinstance(message, ToolMessage):
-            if str(message.name or "") != "task":
-                continue
-            if _task_content_is_actionable(_message_text(message.content)):
-                return True
+
+    last_human_idx = -1
+    last_good_task_idx = -1
+    for index, message in enumerate(messages):
+        if isinstance(message, HumanMessage):
+            last_human_idx = index
             continue
-        if isinstance(message, dict) and message.get("type") == "tool":
+        if isinstance(message, dict) and (
+            message.get("type") == "human" or message.get("role") == "user"
+        ):
+            last_human_idx = index
+            continue
+
+        is_task = False
+        content: Any = None
+        if isinstance(message, ToolMessage) and str(message.name or "") == "task":
+            is_task = True
+            content = message.content
+        elif isinstance(message, dict) and message.get("type") == "tool":
             data = message.get("data") or message
-            if not isinstance(data, dict):
-                continue
-            if str(data.get("name") or message.get("name") or "") != "task":
-                continue
-            if _task_content_is_actionable(_message_text(data.get("content"))):
-                return True
-    return False
+            if isinstance(data, dict) and str(
+                data.get("name") or message.get("name") or ""
+            ) == "task":
+                is_task = True
+                content = data.get("content")
+
+        if is_task and _task_content_is_actionable(_message_text(content)):
+            last_good_task_idx = index
+
+    return last_human_idx >= 0 and last_good_task_idx > last_human_idx
+
+
+def _rag_task_tool_call(
+    template: dict[str, Any],
+    *,
+    user_text: str,
+) -> dict[str, Any]:
+    """Build a ``task`` call that routes a vector-DB request to ``rag_agent``."""
+    subagent_type = str(AgentName.RAG_AGENT)
+    return {
+        **template,
+        "name": "task",
+        "args": {
+            "subagent_type": subagent_type,
+            "description": _default_task_description(user_text, subagent_type),
+        },
+    }
+
+
+def _should_force_rag_task(tool_calls: list[Any], *, user_text: str) -> bool:
+    """True when a RAG ask only produced filesystem tools (no ``task`` / retrieve)."""
+    if not user_text or not _is_rag_request(user_text) or not tool_calls:
+        return False
+    names = {str(dict(call).get("name") or "") for call in tool_calls}
+    if "task" in names or "retrieve_tool" in names:
+        return False
+    return bool(names) and names.issubset(_FILESYSTEM_TOOL_NAMES)
 
 
 def _repair_ai_message(
@@ -343,7 +394,22 @@ def _repair_ai_message(
     if not message.tool_calls:
         return None
 
-    drop_empty_task = _has_successful_task_result(prior_messages)
+    # Models often stall on write_file/edit_file for vector-DB asks and never
+    # reach rag_agent. Replace that dead-end with a single task delegation.
+    if _should_force_rag_task(list(message.tool_calls), user_text=user_text):
+        template = dict(message.tool_calls[0])
+        return AIMessage(
+            content=message.content,
+            id=message.id,
+            name=message.name,
+            tool_calls=[_rag_task_tool_call(template, user_text=user_text)],
+            additional_kwargs=dict(message.additional_kwargs or {}),
+            response_metadata=dict(getattr(message, "response_metadata", None) or {}),
+        )
+
+    # Only drop empty ``task`` when *this* user turn was already answered.
+    # Dropping whenever *any* prior task succeeded skips new questions in-thread.
+    drop_empty_task = _latest_human_already_answered_by_task(prior_messages)
     repaired_calls: list[dict[str, Any]] = []
     changed = False
     for tool_call in message.tool_calls:

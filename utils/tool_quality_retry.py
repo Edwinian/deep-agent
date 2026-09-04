@@ -113,13 +113,32 @@ def evaluate_tool_output(
         "Score how well the output addresses the user query "
         "(relevance, usefulness, specificity). "
         "If the output is an error message or clearly off-topic, score low."
+        " Always return both `score` (0.0-1.0) and `feedback`."
     )
     model = _get_eval_model()
-    result = model.with_structured_output(_EvaluationModel).invoke(
-        [{"role": "user", "content": prompt}]
-    )
-    score = float(result.score)
-    feedback = str(result.feedback or "").strip() or "No feedback."
+    try:
+        result = model.with_structured_output(_EvaluationModel).invoke(
+            [{"role": "user", "content": prompt}]
+        )
+        if isinstance(result, dict):
+            result = _EvaluationModel.model_validate(
+                {
+                    "score": result.get("score", 0.5),
+                    "feedback": result.get("feedback") or "No feedback.",
+                }
+            )
+        score = float(result.score)
+        feedback = str(result.feedback or "").strip() or "No feedback."
+    except Exception as exc:
+        # Some providers return empty structured payloads; don't fail the tool.
+        logger.warning(
+            "evaluate_tool_output structured parse failed for %s: %s",
+            tool_name,
+            exc,
+        )
+        score = 0.65 if len(text) > 40 else 0.35
+        feedback = f"Evaluator unavailable ({type(exc).__name__}); used length heuristic."
+
     return ToolOutputEvaluation(
         score=score,
         feedback=feedback,
@@ -142,14 +161,28 @@ def rewrite_tool_query(
         f"Previous tool output (may be empty or low quality):\n{str(tool_output)[:3000]}\n\n"
         f"Evaluator feedback:\n{feedback}\n\n"
         "Return one improved query string only. Keep it concise and searchable."
+        " Always populate `rewritten_query`."
     )
     model = _get_eval_model()
-    result = model.with_structured_output(_RewriteModel).invoke(
-        [{"role": "user", "content": prompt}]
-    )
-    rewritten = str(result.rewritten_query or "").strip()
+    try:
+        result = model.with_structured_output(_RewriteModel).invoke(
+            [{"role": "user", "content": prompt}]
+        )
+        if isinstance(result, dict):
+            result = _RewriteModel.model_validate(
+                {"rewritten_query": result.get("rewritten_query") or user_query}
+            )
+        rewritten = str(result.rewritten_query or "").strip()
+    except Exception as exc:
+        logger.warning(
+            "rewrite_tool_query structured parse failed for %s: %s",
+            tool_name,
+            exc,
+        )
+        rewritten = ""
     if not rewritten:
-        raise RuntimeError("rewrite_tool_query returned empty content")
+        # Mild fallback rewrite so retries still change something.
+        rewritten = f"{user_query.strip()} key facts passages"
     return rewritten
 
 
@@ -216,12 +249,24 @@ def run_with_quality_retry(
         if on_status is not None:
             on_status(f"Evaluating {tool_name} output quality…")
 
-        evaluation = evaluate_tool_output(
-            original_query,
-            last_output,
-            tool_name=tool_name,
-            min_score=min_score,
-        )
+        try:
+            evaluation = evaluate_tool_output(
+                original_query,
+                last_output,
+                tool_name=tool_name,
+                min_score=min_score,
+            )
+        except Exception as exc:
+            logger.warning(
+                "evaluate_tool_output raised for %s; accepting output: %s",
+                tool_name,
+                exc,
+            )
+            evaluation = ToolOutputEvaluation(
+                score=1.0 if str(last_output or "").strip() else 0.0,
+                feedback=f"Evaluation failed ({type(exc).__name__}); accepted raw output.",
+                is_acceptable=bool(str(last_output or "").strip()),
+            )
         scores.append(evaluation.score)
         last_feedback = evaluation.feedback
 

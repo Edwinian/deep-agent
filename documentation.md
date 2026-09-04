@@ -721,6 +721,7 @@ Point-form walkthrough of each feature — use these steps when explaining the s
 
 - Index docs with `QdrantService`: HuggingFace embeddings, chunk/split, upsert to Qdrant Cloud (web URLs, PDF, DOCX, etc.). `chroma_service.py` remains as a legacy local option.
 - General agent routes vector-DB questions to `rag_agent` via `task`.
+- Short vector-DB lookups skip `write_file` / todos and delegate immediately; arg-repair rewrites filesystem-only tool calls to `task(rag_agent)` and no longer drops empty `task` calls when the current user turn is unanswered.
 - `retrieve_tool` runs agentic RAG: retrieve → evaluate output quality → rewrite query + re-retrieve once if needed → generate grounded answer.
 - Shared `utils/tool_quality_retry.py` powers quality retry for retrieve, web search, and query-like MCP tools.
 - Generate (and legacy grade/rewrite) prompts live in SQLite and are editable via the System Prompts admin UI.
