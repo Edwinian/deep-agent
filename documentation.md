@@ -144,7 +144,8 @@ sequenceDiagram
 
 - Sub-agents have **quarantined context** — they cannot see each other's work; the orchestrator must pass complete standalone task descriptions (`prompts/subagent_usage_instructions.py`).
 - **Parallel delegation** — up to 3 concurrent `task` calls per iteration.
-- **Tool arg repair** — `ToolCallArgsRepairMiddleware` fills missing `task` / `web_search_tool` args when models emit empty JSON (`utils/task_tool_args_repair.py`).
+- **Tool arg repair** — `ToolCallArgsRepairMiddleware` fills missing `task` / `web_search_tool` args when models emit empty JSON (`guardrails/tool_call_args_repair.py`).
+- **PII on leaves** — research and RAG leaf specs get the same `GUARDRAILS` stack as the orchestrator (`utils/compile_subagents.py`).
 
 ---
 
@@ -512,8 +513,11 @@ This attaches:
 
 ### PII guardrails
 
+- Defined in `guardrails/` and applied as the `GUARDRAILS` list.
 - `PIIMiddleware` on input, output, and tool results (email, credit card, IP, MAC).
 - `RedactedPIIResponseMiddleware` blocks assistant replies that treat `[REDACTED_*]` tokens as real data.
+- Orchestrator: `create_deep_agent(middleware=GUARDRAILS)` in `utils/compile_agent.py`.
+- Leaf research/RAG sub-agents: the same `GUARDRAILS` list is assigned in `utils/compile_subagents.py` so delegated `task` paths redact like the orchestrator. `ToolCallArgsRepairMiddleware` stays in that list so HITL still sees filled tool args.
 
 ### MCP tools
 
@@ -658,6 +662,7 @@ cd frontend && npm install && npm run dev
 | Tracing | `utils/tracing.py`, `utils/langfuse_tracing.py` |
 | Streaming | `modules/chats/stream_service.py`, `schemas/invoke_response.py` |
 | Compilation | `utils/compile_agent.py`, `utils/compile_subagents.py` |
+| Guardrails | `guardrails/` (`GUARDRAILS`, PII, tool-arg repair) |
 
 ---
 
@@ -684,7 +689,7 @@ Point-form walkthrough of each feature — use these steps when explaining the s
 - General agent system prompt combines TODOs, virtual filesystem, sub-agent delegation rules, and PII guardrails.
 - Mounted MCP tool groups (weather, math, hotel) on the orchestrator.
 - Delegation: orchestrator calls `task(description, subagent_type)` → isolated sub-agent context → tool use → concise answer back to orchestrator.
-- Design: quarantined sub-agent context, up to 3 parallel `task` calls, middleware to repair empty tool-call args from the LLM.
+- Design: quarantined sub-agent context, up to 3 parallel `task` calls, PII redaction on orchestrator and leaf agents, middleware to repair empty tool-call args from the LLM.
 
 ### Middleware
 
@@ -754,7 +759,7 @@ Point-form walkthrough of each feature — use these steps when explaining the s
 
 - Virtual filesystem / context offloading in state `files`; optional Daytona sandbox per thread when enabled.
 - Skills CRUD + sync skill markdown into the agent backend before each run.
-- PII middleware redacts email/CC/IP/MAC on input, output, and tool results; blocks treating redaction tokens as real data.
+- PII middleware redacts email/CC/IP/MAC on input, output, and tool results for the orchestrator and leaf research/RAG sub-agents; blocks treating redaction tokens as real data.
 - MCP adapters load weather/math/hotel tools; optional Bearer token forwarded into MCP context.
 - Tool-level exponential backoff (`utils/retry.py`) on transient Tavily/Qdrant/MCP failures; permanent errors fail fast.
 - Tool output quality retry (`utils/tool_quality_retry.py`): evaluate score → rewrite query → retry up to a max count.

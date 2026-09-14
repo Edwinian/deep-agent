@@ -8,9 +8,9 @@ from deepagents.middleware.subagents import CompiledSubAgent, SubAgent
 
 from agents.constants import DEEP_AGENT_ONLY_FIELDS, DeepAgentField
 from agents.types import DeepAgent, ModelConfig
+from guardrails import GUARDRAILS
 from utils.compile_agent import compile_agent
 from utils.resolve_model import resolve_model
-from utils.task_tool_args_repair import ToolCallArgsRepairMiddleware
 
 
 def _to_subagent_spec(agent: DeepAgent) -> SubAgent:
@@ -29,12 +29,9 @@ def _to_subagent_spec(agent: DeepAgent) -> SubAgent:
             spec["model"] = resolved
     if "tools" not in spec:
         spec["tools"] = []
-    # Leaf SubAgents skip compile_agent's DEFAULT_PII_MIDDLEWARE; inject
-    # arg repair so HITL sees filled web_search_tool / task args.
-    existing = list(spec.get("middleware") or [])
-    if not any(isinstance(m, ToolCallArgsRepairMiddleware) for m in existing):
-        existing.append(ToolCallArgsRepairMiddleware())
-    spec["middleware"] = existing
+    # Leaf SubAgents do not go through compile_agent(); inject the same
+    # GUARDRAILS list as the orchestrator.
+    spec["middleware"] = GUARDRAILS
     return spec
 
 

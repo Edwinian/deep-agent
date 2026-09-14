@@ -57,6 +57,7 @@ uvicorn main:app --reload
 agents/       Agent specs and registry
 tools/        Agent tools (search, todos, reflection)
 prompts/      System prompts and tool descriptions
+guardrails/   PII and tool-arg repair middleware
 utils/        Compilation, display, and checkpointer helpers
 state.py      Shared agent state schema
 requirements.txt
