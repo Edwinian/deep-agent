@@ -317,6 +317,26 @@ Run document indexing:
 python load_web_documents.py
 ```
 
+### Chunking strategy
+
+Indexing is **extract → split → assign IDs → upsert**, not embed-the-whole-document. `RagPipeline` (`rag_pipeline.py`) owns splitting; `QdrantService.upsert_documents` owns load and stale-chunk cleanup. `QdrantService` / `ChromaService` default to the same `chunk_size=500` and `chunk_overlap=100` and pass those into `RagPipeline`.
+
+**Splitter:** LangChain `RecursiveCharacterTextSplitter` with `length_function=len` and `add_start_index=True`. It tries separators in order so splits prefer natural boundaries:
+
+1. blank line (`\n\n`)
+2. newline
+3. sentence (`. `, `! `, `? `)
+4. space
+5. hard cut (`""`) if nothing else fits
+
+Each chunk is at most **500 characters**, overlapping the previous chunk by **100 characters** so a sentence that straddles a split is still retrievable.
+
+**IDs:** `_get_chunks(docs, source)` numbers splits as `{source}-{chunk_idx}` (0-based) and writes that value to `document.id` and `metadata.id`, plus `metadata.source`. `source` is the web URL, file path, or `{table}:{pk}` for DB/CDC rows.
+
+**Upsert:** Qdrant cannot use those string IDs directly. `_point_id()` maps each logical ID to a stable UUID5 so re-indexing the same source overwrites the same points. After add, the service scrolls existing points for that `metadata.source` and **deletes IDs that are no longer in the new split set** (a shorter re-chunk must not leave orphan passages).
+
+Same ID + stale-delete behavior exists on the legacy Chroma path.
+
 ### Agentic RAG inside `retrieve_tool`
 
 The RAG sub-agent exposes a single tool, `retrieve_tool` (`tools/rag/retrieve_tool.py`), which uses the shared **quality retry** loop (`utils/tool_quality_retry.py`) before generating an answer:
@@ -757,7 +777,7 @@ Point-form walkthrough of each feature — use these steps when explaining the s
 
 ### RAG (retrieval-augmented generation)
 
-- Index docs with `QdrantService`: HuggingFace embeddings, chunk/split, upsert to Qdrant Cloud (web URLs, PDF, DOCX, etc.). `chroma_service.py` remains as a legacy local option.
+- Index docs with `QdrantService`: HuggingFace embeddings, `RecursiveCharacterTextSplitter` (500 chars, 100 overlap, paragraph→sentence separators), deterministic `{source}-{idx}` IDs, upsert to Qdrant Cloud then drop stale chunks for that source. `chroma_service.py` remains as a legacy local option.
 - General agent routes vector-DB questions to `rag_agent` via `task`.
 - Short vector-DB lookups skip `write_file` / todos and delegate immediately; arg-repair rewrites filesystem-only tool calls to `task(rag_agent)` and no longer drops empty `task` calls when the current user turn is unanswered.
 - `retrieve_tool` runs agentic RAG: retrieve → evaluate output quality → rewrite query + re-retrieve once if needed → generate grounded answer.
